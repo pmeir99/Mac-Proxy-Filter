@@ -5,7 +5,6 @@ from pathlib import Path
 from PIL import Image, ImageChops
 from browser_compare import compare
 
-root=Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory() as temp:
     work=Path(temp)/"public"
     work.mkdir()
@@ -19,8 +18,12 @@ with tempfile.TemporaryDirectory() as temp:
         alpha.paste(opacity,box)
     cutout.putalpha(alpha)
     cutout.save(work/"cutout.png")
-    subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
-                    "-subj","/CN=origin.test","-addext","subjectAltName=DNS:origin.test",
+    config = state/"openssl.cnf"
+    config.write_text("[req]\ndistinguished_name=dn\nx509_extensions=extensions\n"
+                      "[dn]\n[extensions]\nbasicConstraints=critical,CA:TRUE\n"
+                      "subjectAltName=DNS:origin.test\n")
+    subprocess.run(["/usr/bin/openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
+                    "-subj","/CN=origin.test","-config",str(config),
                     "-keyout",str(state/"key"),"-out",str(state/"cert")],check=True,stderr=subprocess.DEVNULL)
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self,*a,**kw): super().__init__(*a,directory=str(work),**kw)
@@ -34,15 +37,21 @@ with tempfile.TemporaryDirectory() as temp:
     conf=state/"ca"
     conf.mkdir()
     ready=state/"ready"
+    bundle=Path(os.environ["FILTER_TEST_APP"]).resolve(strict=True)
+    executables=bundle/"Contents/MacOS"
+    engine=bundle/"Contents/Helpers/mitmproxy.app/Contents/MacOS/mitmdump"
     env=dict(os.environ,PYTHONDONTWRITEBYTECODE="1",FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
-             FILTER_WORKER=str(root/"dist/Mac Proxy Filter.app/Contents/MacOS/MaskWorker"))
-    bundle=root/"dist/Mac Proxy Filter.app"
-    proxy=subprocess.Popen(["mitmdump","--quiet","--allow-hosts",r"(?i)^(?:origin\.test)\.?:[0-9]+$","--set","onboarding=false","--listen-host","127.0.0.1","-p","17862",
+             FILTER_WORKER=str(executables/"MaskWorker"))
+    env.update(PATH="/usr/bin:/bin:/usr/sbin:/sbin")
+    env.pop("PYTHONHOME",None)
+    env.pop("PYTHONPATH",None)
+    subprocess.run([engine,"--version"],env=env,check=True)
+    proxy=subprocess.Popen([engine,"--quiet","--allow-hosts",r"(?i)^(?:origin\.test)\.?:[0-9]+$","--set","onboarding=false","--listen-host","127.0.0.1","-p","17862",
         "--set","connection_strategy=lazy","--set","confdir="+str(conf),
         "--set","ssl_verify_upstream_trusted_ca="+str(state/"cert"),
         "-s",str(bundle/"Contents/Resources/filter.py")],env=env)
     try:
-        for _ in range(120):
+        for _ in range(300):
             if ready.exists(): break
             if proxy.poll() is not None: raise RuntimeError("Proxy exited during startup")
             time.sleep(.1)

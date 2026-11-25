@@ -223,21 +223,26 @@ jobs:
           python-version: '3.13'
       - run: python -m pip install Pillow playwright
         if: steps.claim.outputs.winner == 'true'
-      - run: brew install --cask mitmproxy
-        if: steps.claim.outputs.winner == 'true'
-        env:
-          HOMEBREW_NO_AUTO_UPDATE: '1'
-      - run: mitmdump --version
-        if: steps.claim.outputs.winner == 'true'
       - run: python tests/policy_test.py && bash build.sh
         if: steps.claim.outputs.winner == 'true'
+      - name: Package and relocate the release for testing
+        if: steps.claim.outputs.winner == 'true'
+        run: |
+          set -euo pipefail
+          if command -v mitmdump; then
+            echo "Standalone verification requires a runner without mitmdump installed."
+            exit 1
+          fi
+          ditto -c -k --keepParent "dist/Mac Proxy Filter.app" dist/Mac-Proxy-Filter.zip
+          ditto -x -k dist/Mac-Proxy-Filter.zip "$RUNNER_TEMP/Finder extraction"
+          codesign --verify --deep --strict "$RUNNER_TEMP/Finder extraction/Mac Proxy Filter.app"
       - name: Test HTTPS through the real proxy and Vision worker
         env:
+          FILTER_TEST_APP: ${{ runner.temp }}/Finder extraction/Mac Proxy Filter.app
           FILTER_TEST_EVIDENCE: ${{ runner.temp }}/filter-comparison
         if: steps.claim.outputs.winner == 'true'
         run: |
           set -euo pipefail
-          export PATH="$(brew --prefix openssl@3)/bin:$PATH"
           echo '127.0.0.1 origin.test outside.test' | sudo tee -a /etc/hosts
           url=https://raw.githubusercontent.com/scikit-image/scikit-image/e8a42ba85aaf5fd9322ef9ca51bc21063b22fcae/skimage/data
           curl -fsSL --retry 3 "$url/astronaut.png" -o "$RUNNER_TEMP/portrait.png"
@@ -249,8 +254,6 @@ jobs:
           name: Chrome-comparison
           path: ${{ runner.temp }}/filter-comparison/
           if-no-files-found: ignore
-      - run: ditto -c -k --keepParent "dist/Mac Proxy Filter.app" dist/Mac-Proxy-Filter.zip
-        if: steps.claim.outputs.winner == 'true'
       - uses: actions/upload-artifact@v4
         if: steps.claim.outputs.winner == 'true'
         with:
@@ -273,7 +276,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v0.1.0-preview.$GITHUB_RUN_NUMBER" Mac-Proxy-Filter.zip \
+          gh release create "v0.1.1-preview.$GITHUB_RUN_NUMBER" Mac-Proxy-Filter.zip \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
-            --title "Mac Proxy Filter 0.1.0 preview $GITHUB_RUN_NUMBER" \
-            --notes "Apple silicon development build. Install the Homebrew mitmproxy cask first. See the README for domains, trust, setup and coverage."
+            --title "Mac Proxy Filter 0.1.1 preview $GITHUB_RUN_NUMBER" \
+            --notes "Self-contained Apple silicon build. Unzip, drag Mac Proxy Filter to Applications, then open it. The proxy engine and its runtime are included. See the README for the one-time HTTPS trust and network settings."

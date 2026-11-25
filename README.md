@@ -10,7 +10,7 @@ For example, if a product page at `shop.example` loads a thumbnail from `images.
 
 ## Run on your Mac
 
-1. Install the proxy engine with `brew install --cask mitmproxy`. To build from source on Apple silicon, install Xcode Command Line Tools, clone this repository, run `bash build.sh`, then open `dist/Mac Proxy Filter.app`. The app uses the engine at the Homebrew prefix and the Vision framework included with macOS. The build is locally signed for development.
+1. Download **Mac-Proxy-Filter.zip** from the latest Mac Proxy Filter preview, double-click the ZIP in Finder, drag **Mac Proxy Filter** to Applications, and open it. This Apple silicon app includes its proxy engine and Python runtime and uses the Vision framework supplied by macOS. All user setup is graphical. [Releases](https://github.com/pmeir99/Mac-Proxy-Filter/releases)
 2. Enter your test image hosts and press **Start**. Wait for **Listening on this Mac**. Both listeners bind to the loopback interface.
 3. For HTTPS, click **Show public certificate in Finder**. Import that specific `mitmproxy-ca-cert.pem` into your login keychain using Keychain Access, open its Trust section and enable SSL trust. The certificate is unique to this installation. Trust applies beyond the app's domain list. Keep the private key in the app's private Application Support directory. Leave normal website certificate verification enabled.
 4. Record your current network proxy settings. In System Settings → Network → active service → Details → Proxies, enable **Automatic proxy configuration**, enter `http://127.0.0.1:17861/proxy.pac` and apply. A managed network may already require its own PAC. Keep the app running while using this configuration.
@@ -33,6 +33,10 @@ To switch back, restore the previous network proxy settings first, then stop the
 This first build covers fresh, eligible network transfers. Existing caches, inline images, canvas drawing, offline service workers, video frames, unsupported formats, partial responses and responses without a declared size can display unmodified content. Eligible multi-frame files currently fail the still-image scan. Recognition can miss people or blur a false positive. Device throughput, tiny thumbnails, crowd scenes, and live retailer coverage require separate measurements. The worker serializes inference and retains up to 256 cached results with a 32 MiB output budget.
 
 Run `python3 tests/policy_test.py` with Node installed to test PAC routing and TLS scope. The macOS workflow compiles and signature-checks the app. Its integration test runs the real engine against a local TLS origin, sends portrait and object-only fixtures through the Vision worker, compares bytes and output pixels, and checks refusal of an unlisted CONNECT. A second, HTTP browser fixture compares screenshots from direct and PAC-routed Chrome loads. It checks image bounds, a circular clip, an overlaid shape, and an identical portrait on an unlisted host. Test-only certificate trust is confined to the test processes. The workflow downloads the public scikit-image astronaut and coffee fixtures during CI. Runtime inference is local.
+
+## Building from source
+
+On an Apple silicon Mac with Xcode Command Line Tools, run `bash build.sh`. During packaging the script downloads the official arm64 mitmproxy bundle, checks its pinned SHA-256 digest, verifies its signature, and embeds it inside the app. The release workflow extracts the finished ZIP into a separate folder, checks its signature, and tests the included engine with only system directories on its executable search path. The outer app is ad-hoc signed for development.
 
 ## Design references
 

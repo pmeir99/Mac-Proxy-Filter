@@ -24,9 +24,12 @@ final class Controller: ObservableObject {
             return host.utf8.count <= 253 && parts.count >= 2 && parts.last?.allSatisfy(\.isNumber) == false &&
                 parts.allSatisfy { $0.range(of: "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$", options:.regularExpression) != nil }
         }) else { status = "Enter one exact hostname per line."; return }
-        guard let executable = ["/opt/homebrew/bin/mitmdump", "/usr/local/bin/mitmdump"].first(where: {
-            FileManager.default.isExecutableFile(atPath: $0)
-        }) else { status = "Install mitmproxy with Homebrew, then press Start."; return }
+        let executable = Bundle.main.bundleURL
+            .appendingPathComponent("Contents/Helpers/mitmproxy.app/Contents/MacOS/mitmdump")
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            status = "The app is incomplete. Replace it with a fresh copy from Releases."
+            return
+        }
         let child = Process()
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
@@ -34,7 +37,7 @@ final class Controller: ObservableObject {
             let token = directory.appendingPathComponent(UUID().uuidString)
             ready = token
             let resources = Bundle.main.resourceURL!
-            child.executableURL = URL(fileURLWithPath: executable)
+            child.executableURL = executable
             let names = Set(hosts).sorted().map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
             let scope = "(?i)^(?:" + names + #")\.?:[0-9]+$"#
             child.arguments = ["--quiet","--allow-hosts",scope,"--mode","regular","--listen-host","127.0.0.1","--listen-port","17862",
@@ -42,6 +45,9 @@ final class Controller: ObservableObject {
                                "--set","connection_strategy=lazy","--set","onboarding=false","--set","ssl_insecure=false",
                                "-s",resources.appendingPathComponent("filter.py").path]
             var environment = ProcessInfo.processInfo.environment
+            environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
+            environment.removeValue(forKey: "PYTHONHOME")
+            environment.removeValue(forKey: "PYTHONPATH")
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["FILTER_DOMAINS"] = String(decoding:try JSONEncoder().encode(hosts),as:UTF8.self)
             environment["FILTER_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
@@ -64,7 +70,7 @@ final class Controller: ObservableObject {
             active = true
             status = "Starting…"
             Task {
-                for _ in 0..<100 {
+                for _ in 0..<300 {
                     guard self.process === child else { return }
                     if FileManager.default.fileExists(atPath: token.path) {
                         self.status = "Listening on this Mac"
