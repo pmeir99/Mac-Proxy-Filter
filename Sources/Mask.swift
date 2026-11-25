@@ -56,7 +56,14 @@ func scan(_ bytes: Data) throws -> Data {
     let painted = blurred.applyingFilter("CIBlendWithMask", parameters: [
         kCIInputBackgroundImageKey: photo, kCIInputMaskImageKey: mask
     ]).cropped(to: rect)
-    guard let png = context.pngRepresentation(of: painted, format: .RGBA8, colorSpace: rgb),
+    // Compositing the blur can otherwise smear the alpha channel at cutout edges.
+    let opaqueColor = painted.applyingFilter("CIColorMatrix", parameters: [
+        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+        "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+    ])
+    let shaped = opaqueColor.applyingFilter("CISourceInCompositing",
+        parameters: [kCIInputBackgroundImageKey: photo]).cropped(to: rect)
+    guard let png = context.pngRepresentation(of: shaped, format: .RGBA8, colorSpace: rgb),
           png.count <= 32 * 1024 * 1024 else { throw ScanFailure.unsupported }
     return png
 }

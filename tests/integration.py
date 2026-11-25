@@ -11,6 +11,12 @@ with tempfile.TemporaryDirectory() as temp:
     work=Path(temp)
     for path in sys.argv[1:]:
         (work/Path(path).name).write_bytes(Path(path).read_bytes())
+    cutout=Image.open(work/"portrait.png").convert("RGBA")
+    alpha=Image.new("L",cutout.size,255)
+    for opacity,box in [(0,(160,230,210,310)),(128,(270,240,290,305))]:
+        alpha.paste(opacity,box)
+    cutout.putalpha(alpha)
+    cutout.save(work/"cutout.png")
     subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                     "-subj","/CN=origin.test","-addext","subjectAltName=DNS:origin.test",
                     "-keyout",str(work/"key"),"-out",str(work/"cert")],check=True,stderr=subprocess.DEVNULL)
@@ -28,10 +34,11 @@ with tempfile.TemporaryDirectory() as temp:
     ready=work/"ready"
     env=dict(os.environ,FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
              FILTER_WORKER=str(root/"dist/Mac Proxy Filter.app/Contents/MacOS/MaskWorker"))
+    bundle=root/"dist/Mac Proxy Filter.app"
     proxy=subprocess.Popen(["mitmdump","--quiet","--listen-host","127.0.0.1","-p","17862",
         "--set","connection_strategy=lazy","--set","confdir="+str(conf),
         "--set","ssl_verify_upstream_trusted_ca="+str(work/"cert"),
-        "-s",str(root/"proxy/filter.py")],env=env)
+        "-s",str(bundle/"Contents/Resources/filter.py")],env=env)
     try:
         for _ in range(120):
             if ready.exists(): break
@@ -40,12 +47,15 @@ with tempfile.TemporaryDirectory() as temp:
         assert ready.exists()
         curl=["curl","--silent","--show-error","--noproxy","","--proxy","http://127.0.0.1:17862",
               "--max-time","30","--cacert",str(conf/"mitmproxy-ca-cert.pem")]
-        for name in ["coffee.png","portrait.png"]:
+        for name in ["coffee.png","portrait.png","cutout.png"]:
             out=work/("out-"+name)
             subprocess.run(curl+["--fail","https://origin.test:18243/"+name,"-o",str(out)],check=True)
             if name=="coffee.png":
                 assert out.read_bytes()==(work/name).read_bytes(),"Clear image changed"
             else:
+                if name=="cutout.png":
+                    actual_alpha=Image.open(out).convert("RGBA").getchannel("A")
+                    assert ImageChops.difference(alpha,actual_alpha).getbbox() is None, "Alpha changed"
                 a=Image.open(work/name).convert("RGB")
                 b=Image.open(out).convert("RGB")
                 assert a.size==b.size
@@ -55,6 +65,7 @@ with tempfile.TemporaryDirectory() as temp:
         veto=subprocess.run(curl+["--fail","https://elsewhere.test/"],capture_output=True)
         assert veto.returncode and b"403" in veto.stderr,veto.stderr
         compare(work)
+        subprocess.run(["codesign","--verify","--deep","--strict",str(bundle)], check=True)
         print("HTTPS portrait masked, clear bytes preserved, unlisted CONNECT refused")
     finally:
         proxy.terminate()

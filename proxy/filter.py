@@ -8,6 +8,8 @@ from collections import OrderedDict
 from pathlib import Path
 from mitmproxy import ctx, http
 
+# Keep imports from creating files inside the signed app bundle.
+sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from policy import domains, pac, tls_pattern
 
@@ -22,6 +24,7 @@ class Filter:
         self.lock = asyncio.Lock()
         self.worker = None
         self.server = None
+        self.parent_watch = None
 
     def load(self, loader):
         ctx.options.update(allow_hosts=[tls_pattern(self.hosts)])
@@ -29,9 +32,20 @@ class Filter:
     async def running(self):
         try:
             self.server = await asyncio.start_server(self.serve_pac, "127.0.0.1", 17861, limit=4096)
+            if "FILTER_PARENT_PID" in os.environ:
+                self.parent_watch = asyncio.create_task(self.watch_parent(int(os.environ["FILTER_PARENT_PID"])))
             Path(os.environ["FILTER_READY"]).write_text("ready")
         except OSError:
             ctx.master.shutdown()
+
+    async def watch_parent(self, parent):
+        while True:
+            try:
+                os.kill(parent, 0)
+            except ProcessLookupError:
+                ctx.master.shutdown()
+                return
+            await asyncio.sleep(1)
 
     async def serve_pac(self, reader, writer):
         try:
@@ -123,6 +137,8 @@ class Filter:
             r.content = masked
 
     def done(self):
+        if self.parent_watch:
+            self.parent_watch.cancel()
         if self.server:
             self.server.close()
         if self.worker and self.worker.returncode is None:

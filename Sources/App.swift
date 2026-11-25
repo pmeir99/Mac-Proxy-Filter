@@ -42,7 +42,9 @@ final class Controller: ObservableObject {
                                "--set","connection_strategy=lazy","--set","onboarding=false","--set","ssl_insecure=false",
                                "-s",resources.appendingPathComponent("filter.py").path]
             var environment = ProcessInfo.processInfo.environment
+            environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["FILTER_DOMAINS"] = String(decoding:try JSONEncoder().encode(hosts),as:UTF8.self)
+            environment["FILTER_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
             environment["FILTER_READY"] = token.path
             environment["FILTER_WORKER"] = Bundle.main.bundleURL.appendingPathComponent("Contents/MacOS/MaskWorker").path
             child.environment = environment
