@@ -232,6 +232,8 @@ jobs:
       - run: python tests/policy_test.py && bash build.sh
         if: steps.claim.outputs.winner == 'true'
       - name: Test HTTPS through the real proxy and Vision worker
+        env:
+          FILTER_TEST_EVIDENCE: ${{ runner.temp }}/filter-comparison
         if: steps.claim.outputs.winner == 'true'
         run: |
           set -euo pipefail
@@ -241,6 +243,12 @@ jobs:
           curl -fsSL --retry 3 "$url/astronaut.png" -o "$RUNNER_TEMP/portrait.png"
           curl -fsSL --retry 3 "$url/coffee.png" -o "$RUNNER_TEMP/coffee.png"
           python tests/integration.py "$RUNNER_TEMP/portrait.png" "$RUNNER_TEMP/coffee.png"
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.claim.outputs.winner == 'true'
+        with:
+          name: Chrome-comparison
+          path: ${{ runner.temp }}/filter-comparison/
+          if-no-files-found: ignore
       - run: ditto -c -k --keepParent "dist/Mac Proxy Filter.app" dist/Mac-Proxy-Filter.zip
         if: steps.claim.outputs.winner == 'true'
       - uses: actions/upload-artifact@v4

@@ -1,5 +1,4 @@
 """CI uses private temporary trust and a local HTTPS origin on an isolated runner."""
-import contextlib
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import os, json, ssl, subprocess, sys, tempfile, threading, time
 from pathlib import Path
@@ -8,7 +7,10 @@ from browser_compare import compare
 
 root=Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory() as temp:
-    work=Path(temp)
+    work=Path(temp)/"public"
+    work.mkdir()
+    state=Path(temp)/"private"
+    state.mkdir(mode=0o700)
     for path in sys.argv[1:]:
         (work/Path(path).name).write_bytes(Path(path).read_bytes())
     cutout=Image.open(work/"portrait.png").convert("RGBA")
@@ -19,25 +21,25 @@ with tempfile.TemporaryDirectory() as temp:
     cutout.save(work/"cutout.png")
     subprocess.run(["openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                     "-subj","/CN=origin.test","-addext","subjectAltName=DNS:origin.test",
-                    "-keyout",str(work/"key"),"-out",str(work/"cert")],check=True,stderr=subprocess.DEVNULL)
+                    "-keyout",str(state/"key"),"-out",str(state/"cert")],check=True,stderr=subprocess.DEVNULL)
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self,*a,**kw): super().__init__(*a,directory=str(work),**kw)
     origin=ThreadingHTTPServer(("127.0.0.1",18243), Handler)
     tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    tls.load_cert_chain(work/"cert",work/"key")
+    tls.load_cert_chain(state/"cert",state/"key")
     origin.socket=tls.wrap_socket(origin.socket,server_side=True)
     threading.Thread(target=origin.serve_forever,daemon=True).start()
     web=ThreadingHTTPServer(("127.0.0.1",18280), Handler)
     threading.Thread(target=web.serve_forever,daemon=True).start()
-    conf=work/"ca"
+    conf=state/"ca"
     conf.mkdir()
-    ready=work/"ready"
-    env=dict(os.environ,FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
+    ready=state/"ready"
+    env=dict(os.environ,PYTHONDONTWRITEBYTECODE="1",FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
              FILTER_WORKER=str(root/"dist/Mac Proxy Filter.app/Contents/MacOS/MaskWorker"))
     bundle=root/"dist/Mac Proxy Filter.app"
-    proxy=subprocess.Popen(["mitmdump","--quiet","--listen-host","127.0.0.1","-p","17862",
+    proxy=subprocess.Popen(["mitmdump","--quiet","--allow-hosts",r"(?i)^(?:origin\.test)\.?:[0-9]+$","--set","onboarding=false","--listen-host","127.0.0.1","-p","17862",
         "--set","connection_strategy=lazy","--set","confdir="+str(conf),
-        "--set","ssl_verify_upstream_trusted_ca="+str(work/"cert"),
+        "--set","ssl_verify_upstream_trusted_ca="+str(state/"cert"),
         "-s",str(bundle/"Contents/Resources/filter.py")],env=env)
     try:
         for _ in range(120):
@@ -49,7 +51,9 @@ with tempfile.TemporaryDirectory() as temp:
               "--max-time","30","--cacert",str(conf/"mitmproxy-ca-cert.pem")]
         for name in ["coffee.png","portrait.png","cutout.png"]:
             out=work/("out-"+name)
+            started=time.perf_counter()
             subprocess.run(curl+["--fail","https://origin.test:18243/"+name,"-o",str(out)],check=True)
+            print(f"{name}: end-to-end {(time.perf_counter()-started)*1000:.0f} ms",flush=True)
             if name=="coffee.png":
                 assert out.read_bytes()==(work/name).read_bytes(),"Clear image changed"
             else:

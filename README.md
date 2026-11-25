@@ -41,3 +41,12 @@ Run `python3 tests/policy_test.py` with Node installed to test PAC routing and T
 - The proxy engine documents certificate generation, client trust, upstream verification and host selection. [Certificates](https://docs.mitmproxy.org/stable/concepts/certificates/) · [Options](https://docs.mitmproxy.org/stable/concepts/options/) · [Installation](https://docs.mitmproxy.org/stable/overview/installation/)
 - Apple's person-segmentation request produces a foreground mask suited to compositing. [Vision segmentation](https://developer.apple.com/documentation/vision/vngeneratepersonsegmentationrequest)
 - HTTP defines no-transform for intermediaries and separate semantics for range responses. [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html) · [RFC 9111](https://www.rfc-editor.org/rfc/rfc9111.html)
+
+### Interception options considered
+
+| Method | Fit for this project |
+| --- | --- |
+| DNS proxy | DNS sees hostname lookups. It can support blocking an entire destination. Pixel masking needs access to each image response. [Apple DNS proxy](https://developer.apple.com/documentation/networkextension/nednsproxyprovider) |
+| macOS content-filter extension | Apple's data provider has read-only access to flows and issues filtering verdicts. Replacing a JPEG with a composited image requires another mechanism. [Apple Network Extensions session](https://developer.apple.com/videos/play/wwdc2019/714/) |
+| Chrome page extension | A page script has the embedding context and can cover inline or generated media, but has to track DOM changes and clipping. Chrome's declarative request rules also have documented limits for service-worker-generated responses. [Chrome request rules](https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest/) |
+| Local HTTP proxy with a PAC | Used in this build. A fresh image response can be replaced once before Chrome decodes it, regardless of whether the website used an img element or a CSS background. The browser owns the final geometry. The PAC sees the resource destination. Browser-local media and an embedding-page-only scope on a shared CDN would require browser cooperation. [Chromium PAC behavior](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md) |

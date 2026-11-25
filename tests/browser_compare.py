@@ -1,6 +1,7 @@
 """Compare fresh direct and PAC-routed loads in regular Chrome on the CI Mac."""
 from io import BytesIO
 from pathlib import Path
+import os
 from PIL import Image, ImageChops
 from playwright.sync_api import sync_playwright
 
@@ -34,6 +35,11 @@ def compare(directory):
 
         bounds, before = capture(["--no-proxy-server"])
         new_bounds, after = capture(["--proxy-pac-url=http://127.0.0.1:17861/proxy.pac"])
+    if "FILTER_TEST_EVIDENCE" in os.environ:
+        evidence = Path(os.environ["FILTER_TEST_EVIDENCE"])
+        evidence.mkdir(parents=True, exist_ok=True)
+        before.save(evidence / "chrome-direct.png")
+        after.save(evidence / "chrome-filtered.png")
     assert bounds == new_bounds, "The filter changed a tile or image rectangle"
     delta = ImageChops.difference(before, after)
     assert delta.crop((45, 35, 104, 70)).getbbox(), "Selected portrait unchanged in Chrome"
