@@ -35,7 +35,9 @@ final class Controller: ObservableObject {
             ready = token
             let resources = Bundle.main.resourceURL!
             child.executableURL = URL(fileURLWithPath: executable)
-            child.arguments = ["--quiet","--mode","regular","--listen-host","127.0.0.1","--listen-port","17862",
+            let names = Set(hosts).sorted().map(NSRegularExpression.escapedPattern(for:)).joined(separator: "|")
+            let scope = "(?i)^(?:" + names + #")\.?:[0-9]+$"#
+            child.arguments = ["--quiet","--allow-hosts",scope,"--mode","regular","--listen-host","127.0.0.1","--listen-port","17862",
                                "--set","confdir="+directory.path,"--set","flow_detail=0","--set","termlog_verbosity=error",
                                "--set","connection_strategy=lazy","--set","onboarding=false","--set","ssl_insecure=false",
                                "-s",resources.appendingPathComponent("filter.py").path]

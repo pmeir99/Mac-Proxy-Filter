@@ -47,7 +47,7 @@ class Filter:
             writer.close()
 
     def allowed(self, req):
-        return req.host.lower().rstrip(".") in self.hosts and req.port in (443, 80)
+        return req.host.lower().rstrip(".") in self.hosts and 1 <= req.port <= 65535
 
     def http_connect(self, flow):
         if not self.allowed(flow.request):

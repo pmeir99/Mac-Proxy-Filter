@@ -18,8 +18,8 @@ def domains(values):
     return sorted(result)
 
 def pac(hosts):
-    return """function FindProxyForURL(url, host) {
-  host = host.toLowerCase().replace(/\\.$/, "");
+    return r"""function FindProxyForURL(url, host) {
+  host = host.toLowerCase().replace(/\.$/, "");
   var domains = %s;
   if (!/^https?:/i.test(url)) return "DIRECT";
   return domains.indexOf(host) >= 0 ? "PROXY 127.0.0.1:17862" : "DIRECT";
@@ -27,4 +27,4 @@ def pac(hosts):
 
 def tls_pattern(hosts):
     names = "|".join(re.escape(host) for host in domains(hosts))
-    return r"(?i)^(?:" + (names or "(?!)") + r")\.?:(?:443|80)$"
+    return r"(?i)^(?:" + (names or "(?!)") + r")\.?:[0-9]+$"

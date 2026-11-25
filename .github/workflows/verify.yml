@@ -11,13 +11,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - run: python -m pip install mitmproxy==12.2.1 Pillow
+      - run: python -m pip install mitmproxy==12.2.1 Pillow playwright
       - run: python tests/policy_test.py && bash build.sh
       - name: Test HTTPS through the real proxy and Vision worker
         run: |
           set -euo pipefail
           export PATH="$(brew --prefix openssl@3)/bin:$PATH"
-          echo '127.0.0.1 origin.test' | sudo tee -a /etc/hosts
+          echo '127.0.0.1 origin.test outside.test' | sudo tee -a /etc/hosts
           url=https://raw.githubusercontent.com/scikit-image/scikit-image/e8a42ba85aaf5fd9322ef9ca51bc21063b22fcae/skimage/data
           curl -fsSL --retry 3 "$url/astronaut.png" -o "$RUNNER_TEMP/portrait.png"
           curl -fsSL --retry 3 "$url/coffee.png" -o "$RUNNER_TEMP/coffee.png"

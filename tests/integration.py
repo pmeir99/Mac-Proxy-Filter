@@ -4,6 +4,7 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import os, json, ssl, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 from PIL import Image, ImageChops
+from browser_compare import compare
 
 root=Path(__file__).resolve().parents[1]
 with tempfile.TemporaryDirectory() as temp:
@@ -15,11 +16,13 @@ with tempfile.TemporaryDirectory() as temp:
                     "-keyout",str(work/"key"),"-out",str(work/"cert")],check=True,stderr=subprocess.DEVNULL)
     class Handler(SimpleHTTPRequestHandler):
         def __init__(self,*a,**kw): super().__init__(*a,directory=str(work),**kw)
-    origin=ThreadingHTTPServer(("127.0.0.1",443), Handler)
+    origin=ThreadingHTTPServer(("127.0.0.1",18243), Handler)
     tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain(work/"cert",work/"key")
     origin.socket=tls.wrap_socket(origin.socket,server_side=True)
     threading.Thread(target=origin.serve_forever,daemon=True).start()
+    web=ThreadingHTTPServer(("127.0.0.1",18280), Handler)
+    threading.Thread(target=web.serve_forever,daemon=True).start()
     conf=work/"ca"
     conf.mkdir()
     ready=work/"ready"
@@ -39,7 +42,7 @@ with tempfile.TemporaryDirectory() as temp:
               "--max-time","30","--cacert",str(conf/"mitmproxy-ca-cert.pem")]
         for name in ["coffee.png","portrait.png"]:
             out=work/("out-"+name)
-            subprocess.run(curl+["--fail","https://origin.test/"+name,"-o",str(out)],check=True)
+            subprocess.run(curl+["--fail","https://origin.test:18243/"+name,"-o",str(out)],check=True)
             if name=="coffee.png":
                 assert out.read_bytes()==(work/name).read_bytes(),"Clear image changed"
             else:
@@ -51,8 +54,10 @@ with tempfile.TemporaryDirectory() as temp:
                 assert delta.getpixel((2,2))==(0,0,0),"Corner changed"
         veto=subprocess.run(curl+["--fail","https://elsewhere.test/"],capture_output=True)
         assert veto.returncode and b"403" in veto.stderr,veto.stderr
+        compare(work)
         print("HTTPS portrait masked, clear bytes preserved, unlisted CONNECT refused")
     finally:
         proxy.terminate()
         proxy.wait(timeout=10)
         origin.shutdown()
+        web.shutdown()
