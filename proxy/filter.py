@@ -110,12 +110,22 @@ class Filter:
         if not transform or not length.isdecimal() or not 0 < int(length) <= LIMIT:
             r.stream = True
             if self.capture and (kind.startswith("image/") or flow.request.headers.get("sec-fetch-dest") == "image"):
-                self.journal.add(flow,"Skipped")
+                if r.status_code != 200: reason = f"HTTP {r.status_code}"
+                elif kind not in TYPES: reason = "media type"
+                elif not length.isdecimal(): reason = "unknown size"
+                elif int(length) > LIMIT: reason = "over size limit"
+                elif r.headers.get("content-encoding","identity").lower() != "identity": reason = "content encoding"
+                else: reason = "response policy"
+                self.journal.add(flow,"Skipped · "+reason)
         else:
             flow.metadata["scan"] = True
 
     async def analyze(self, body):
         key = hashlib.sha256(body).digest()
+        # Serve completed results while another image is using the Vision worker.
+        if key in self.cache:
+            self.cache.move_to_end(key)
+            return self.cache[key]
         async with self.lock:
             if key in self.cache:
                 self.cache.move_to_end(key)

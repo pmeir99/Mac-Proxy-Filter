@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import ServiceManagement
 
 struct Event: Codable, Identifiable {
     let id, site, host, verdict, mime: String
@@ -14,6 +15,7 @@ struct Interface: View {
     @AppStorage("maskStrength") var strength = 0.35
     @AppStorage("maskMargin") var margin = 0.0
     @AppStorage("maskColor") var hex = "222222"
+    @AppStorage("backgroundMode") var backgroundMode = false
     @AppStorage("capture") var capture = false
     @State private var site = ""
     @State private var notice = ""
@@ -27,6 +29,13 @@ struct Interface: View {
                     if !model.activity.isEmpty { Text(model.activity).font(.callout).textSelection(.enabled) }
                     Button(model.active ? "Stop filtering" : "Enable filtering…") { model.active ? model.stop() : model.enableFromStopped() }.buttonStyle(.borderedProminent).disabled(model.settingUp)
                     if !model.setupMessage.isEmpty { Text(model.setupMessage).foregroundStyle(.secondary) }
+                }
+                Section("Startup and background") {
+                    Toggle("Start at login",isOn:Binding(get:{ model.loginStatus == .enabled || model.loginStatus == .requiresApproval },set:{ model.login($0) }))
+                    if model.loginStatus == .requiresApproval {
+                        Button("Approve in Login Items…") { SMAppService.openSystemSettingsLoginItems() }
+                    }
+                    Toggle("Keep filtering in the menu bar when I press ⌘Q",isOn:$backgroundMode)
                 }
                 Section("Websites") {
                     Toggle("Filter all public websites",isOn:$model.allSites)

@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ServiceManagement
 import SystemConfiguration
 
 @MainActor
@@ -56,6 +57,29 @@ final class Controller: ObservableObject {
                 }.value
             } catch { setupMessage = error.localizedDescription }
             settingUp = false
+        }
+    }
+    @Published var loginStatus = SMAppService.mainApp.status
+    private var launched = false
+    func launch() {
+        guard !launched else { return }
+        launched = true
+        let prefs = UserDefaults.standard
+        if prefs.bool(forKey:"resumeAfterUpdate") {
+            prefs.removeObject(forKey:"resumeAfterUpdate")
+            enableFromStopped()
+        } else if SMAppService.mainApp.status == .enabled && prefs.bool(forKey:"resumeProtection") {
+            start()
+        }
+    }
+
+    func login(_ enable: Bool) {
+        Task {
+            do {
+                if enable { try SMAppService.mainApp.register() }
+                else { try await SMAppService.mainApp.unregister() }
+            } catch { setupMessage = error.localizedDescription }
+            loginStatus = SMAppService.mainApp.status
         }
     }
     var process: Process?
@@ -154,6 +178,7 @@ final class Controller: ObservableObject {
                 for _ in 0..<300 {
                     guard self.process === child else { return }
                     if FileManager.default.fileExists(atPath: token.path) {
+                        UserDefaults.standard.set(true,forKey:"resumeProtection")
                         self.status = "Listening on this Mac"
                         if self.setupAfterStart { self.setupAfterStart = false; self.setup(enable: true) }
                         await self.observe(child)
@@ -168,7 +193,8 @@ final class Controller: ObservableObject {
 
     func enableFromStopped() { setupAfterStart = true; start() }
 
-    func stop() {
+    func stop(manual: Bool = true) {
+        if manual { UserDefaults.standard.set(false,forKey:"resumeProtection") }
         activity = ""
         events = []
         setupAfterStart = false
@@ -183,16 +209,27 @@ final class Controller: ObservableObject {
 @main
 struct FilterApp: App {
     @StateObject private var model = Controller()
+    @AppStorage("backgroundMode") var backgroundMode = false
+    @Environment(\.openWindow) var openWindow
     var body: some Scene {
-        WindowGroup("Mac Proxy Filter") {
+        Window("Mac Proxy Filter", id:"main") {
             Interface(model:model)
-                .onAppear {
-                    if UserDefaults.standard.bool(forKey:"resumeAfterUpdate") {
-                        UserDefaults.standard.removeObject(forKey:"resumeAfterUpdate")
-                        model.enableFromStopped()
-                    }
+                .onAppear { model.launch() }
+                .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
+                    model.loginStatus = SMAppService.mainApp.status
                 }
-            .onReceive(NotificationCenter.default.publisher(for:NSApplication.willTerminateNotification)) { _ in model.stop() }
+                .onReceive(NotificationCenter.default.publisher(for:NSApplication.willTerminateNotification)) { _ in model.stop(manual:false) }
+        }.commands {
+            CommandGroup(replacing:.appTermination) {
+                Button(backgroundMode ? "Continue in Background" : "Quit Mac Proxy Filter") {
+                    if backgroundMode { NSApp.hide(nil) } else { NSApp.terminate(nil) }
+                }.keyboardShortcut("q")
+            }
+        }
+        MenuBarExtra("Mac Proxy Filter",systemImage:"shield",isInserted:$backgroundMode) {
+            Text(model.status)
+            Button("Open Mac Proxy Filter") { openWindow(id:"main"); NSApp.activate(ignoringOtherApps:true) }
+            Button("Quit Completely") { NSApp.terminate(nil) }
         }
     }
 }

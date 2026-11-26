@@ -34,18 +34,27 @@ func scan(_ bytes: Data) throws -> Data {
             kCGImageSourceThumbnailMaxPixelSize:1024
           ] as CFDictionary) else { throw ScanFailure.unsupported }
     let request = VNGeneratePersonSegmentationRequest()
-    request.qualityLevel = .balanced
+    let small = max(thumb.width, thumb.height) <= 256
+    var analysis = thumb
+    if small {
+        let scale = 512.0 / CGFloat(max(thumb.width, thumb.height))
+        let enlarged = CIImage(cgImage:thumb).applyingFilter("CILanczosScaleTransform",
+            parameters:[kCIInputScaleKey:scale,kCIInputAspectRatioKey:1])
+        analysis = context.createCGImage(enlarged,from:enlarged.extent) ?? thumb
+    }
+    request.qualityLevel = small ? .accurate : .balanced
     request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-    try VNImageRequestHandler(cgImage: thumb, options: [:]).perform([request])
+    try VNImageRequestHandler(cgImage: analysis, options: [:]).perform([request])
     guard let buffer = request.results?.first?.pixelBuffer else { throw ScanFailure.unsupported }
     CVPixelBufferLockBaseAddress(buffer, .readOnly)
     defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
     guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw ScanFailure.unsupported }
     let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
     var x0 = width, x1 = -1, y0 = height, y1 = -1
-    for y in 0..<height {
+    let rectangle = ProcessInfo.processInfo.environment["FILTER_SHAPE"] == "Rectangle"
+    rows: for y in 0..<height {
         let row = base.advanced(by: y * CVPixelBufferGetBytesPerRow(buffer)).assumingMemoryBound(to: UInt8.self)
-        for x in 0..<width where row[x] >= 128 { x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y) }
+        for x in 0..<width where row[x] >= 128 { if !rectangle { x1 = x; break rows }; x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y) }
     }
     guard x1 >= x0 else { return Data() }
     let rect = photo.extent

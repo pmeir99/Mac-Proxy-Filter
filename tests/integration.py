@@ -99,6 +99,15 @@ with tempfile.TemporaryDirectory() as temp:
                 assert delta.getpixel((2,2))==(0,0,0),"Corner changed"
         veto=subprocess.run(curl+["--fail","https://elsewhere.test/"],capture_output=True)
         assert veto.returncode and b"403" in veto.stderr,veto.stderr
+        for edge in (64,128):
+            for name in ("portrait","coffee"):
+                thumb=Image.open(work/(name+".png")).convert("RGB")
+                thumb.thumbnail((edge,edge))
+                path=work/f"{name}-{edge}.jpg"
+                thumb.save(path,quality=75)
+                served=subprocess.check_output(curl+["--fail","https://origin.test:18243/"+path.name])
+                assert Image.open(BytesIO(served)).size==thumb.size
+                assert (served==path.read_bytes())==(name=="coffee"), path.name
         diagnostic=["curl","--fail","--silent","--noproxy","*","-H","Authorization: Bearer ci-test"]
         export_url="http://127.0.0.1:17861/export"
         assert subprocess.run(["curl","--fail","--silent","--noproxy","*",export_url],capture_output=True).returncode != 0
