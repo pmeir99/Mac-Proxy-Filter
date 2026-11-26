@@ -46,7 +46,10 @@ with tempfile.TemporaryDirectory() as temp:
     env.pop("PYTHONHOME",None)
     env.pop("PYTHONPATH",None)
     subprocess.run([engine,"--version"],env=env,check=True)
-    proxy=subprocess.Popen([engine,"--quiet","--allow-hosts",r"(?i)^(?:origin\.test)\.?:[0-9]+$","--set","onboarding=false","--listen-host","127.0.0.1","-p","17862",
+    if env.get("FILTER_ALL") == "1":
+        env["FILTER_DOMAINS"] = "[]"
+        env["FILTER_EXCLUDED"] = json.dumps(["outside.test", "elsewhere.test"])
+    proxy=subprocess.Popen([engine,"--quiet","--set","onboarding=false","--listen-host","127.0.0.1","-p","17862",
         "--set","connection_strategy=lazy","--set","confdir="+str(conf),
         "--set","ssl_verify_upstream_trusted_ca="+str(state/"cert"),
         "-s",str(bundle/"Contents/Resources/filter.py")],env=env)
@@ -84,6 +87,8 @@ with tempfile.TemporaryDirectory() as temp:
         veto=subprocess.run(curl+["--fail","https://elsewhere.test/"],capture_output=True)
         assert veto.returncode and b"403" in veto.stderr,veto.stderr
         compare(work)
+        stats=json.loads(subprocess.check_output(["curl","--noproxy","*","--silent","http://127.0.0.1:17861/status"]))
+        assert stats["scanned"] >= 3 and stats["masked"] >= 2, stats
         subprocess.run(["codesign","--verify","--deep","--strict",str(bundle)], check=True)
         print("HTTPS portrait masked, clear bytes preserved, unlisted CONNECT refused")
     finally:

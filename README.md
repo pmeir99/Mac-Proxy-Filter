@@ -8,13 +8,13 @@ Start with an empty list. Enter one exact destination hostname per line. To chan
 
 For example, if a product page at `shop.example` loads a thumbnail from `images.example`, add `images.example` to cover that thumbnail. Adding only `shop.example` covers images served by the shop host itself. A selected shared CDN is filtered everywhere it is used. Subdomains require their own entries. Chrome DevTools → Network → Img → Request URL shows the actual destination. An embedded data URL has no separate network request.
 
-For Amazon, choose **Use Amazon image hosts** while stopped. This replaces the Amazon storefront entries with its product-image CDN and preserves other sites. Before enabling routing, setup now makes an unauthenticated HTTPS HEAD request through the local proxy to each selected host. A failed check leaves existing routing as configured. To recover from an earlier setup, use **Restore previous network routing…** while the filter is still running, then stop and edit the list.
+Choose **Filter all public websites** to cover public HTTP(S) hostname destinations in PAC-aware clients, including separate image hosts. Use the direct-connection list for exact host exceptions such as a pinned service. Local names and literal IPs go direct in all-sites mode. Availability-first behavior allows direct traffic if the proxy is unreachable and returns the original image when inference fails. Inline images and unsupported network responses still have the coverage limits below.
 
 ## Run on your Mac
 
 1. Download **Mac-Proxy-Filter.zip** from the latest Mac Proxy Filter preview, double-click the ZIP in Finder, drag **Mac Proxy Filter** to Applications, and open it. This Apple silicon app includes its proxy engine and Python runtime and uses the Vision framework supplied by macOS. All user setup is graphical. [Releases](https://github.com/pmeir99/Mac-Proxy-Filter/releases)
-2. Enter your test image hosts and press **Start**. Wait for **Listening on this Mac**. Both listeners bind to the loopback interface.
-3. Click **Enable HTTPS filtering on this Mac…** and approve macOS prompts. This trusts the app's local certificate for SSL in your user account and applies its proxy URL across existing network services. Certificate trust is broader than the selected domain list.
+2. Choose your scope and click **Enable filtering…**. Approve the macOS dialogs. The app checks a selected HTTPS destination (example.com or example.org in all-sites mode), verifies trust, and applies routing. Existing competing proxy settings are skipped.
+3. Look for **Enabled on current network** and increasing request and image counters. The TLS check itself can count as a request. **Check or repair setup…** retries the setup. Diagnostics store counts only.
 4. Wi-Fi networks that use the same Wi-Fi service share its settings. If you add a new network service later, run setup again. Services with an existing active proxy are reported and skipped. Use **Restore previous network routing…** before stopping or uninstalling. Remove certificate trust separately in Keychain Access.
 5. For a clean test, disable the old image-filter extension, open DevTools with **Disable cache** enabled, and reload the page. Compare a person and a product-only image on the selected host, then load an image on an unrelated host. Check the element dimensions and any CSS crop or border radius in both views. A fresh browser profile helps distinguish service-worker responses from new network transfers.
 
@@ -28,7 +28,7 @@ To switch back, restore the previous network proxy settings first, then stop the
 | HTTPS | mitmproxy terminates the selected connection locally and verifies the origin's certificate. A client that pins certificates or ignores system proxy settings may fail or bypass this route. |
 | Image selection | Full 200 GET responses with a supported image MIME type, identity encoding and a declared body length of up to 8 MiB are eligible. The filter respects no-transform. Other responses stream through. |
 | Recognition | A resident Swift process decodes a still image up to 12 megapixels and runs Vision on an orientation-corrected thumbnail of up to 1024 pixels on its longest side. Repeated bytes reuse an in-memory decision. No standalone model download is required. |
-| Rendering | An empty detection returns the original response bytes. A positive result returns a full-resolution PNG with the detected people blurred. The page keeps its own element, positioning and CSS clipping. A scan failure on an eligible image returns HTTP 502. |
+| Rendering | An empty detection returns the original response bytes. A positive result returns a full-resolution PNG with the detected people blurred. The page keeps its own element, positioning and CSS clipping. A scan failure preserves the original image and increments the error count. |
 
 ## Coverage and verification
 

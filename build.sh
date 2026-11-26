@@ -36,7 +36,7 @@ cat > "$app/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Mac Proxy Filter</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>2</string>
-<key>CFBundleShortVersionString</key><string>0.1.3</string>
+<key>CFBundleShortVersionString</key><string>0.1.4</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict></plist>
 PLIST

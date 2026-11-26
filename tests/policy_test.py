@@ -21,10 +21,18 @@ class PolicyTest(unittest.TestCase):
             result=subprocess.check_output(["node","-e",pac(selected)+f'\nconsole.log(FindProxyForURL("https://x/", "{host}"))'],text=True).strip()
             self.assertEqual(result.startswith("PROXY"),enabled)
             self.assertEqual(bool(re.fullmatch(tls_pattern(selected),host+":443")),enabled)
-        for url, expected in [("https://media.example.com:8080/", "PROXY 127.0.0.1:17862"), ("ftp://media.example.com/", "DIRECT")]:
+        for url, expected in [("https://media.example.com:8080/", "PROXY 127.0.0.1:17862; DIRECT"), ("ftp://media.example.com/", "DIRECT")]:
             js = pac(selected) + f'\nconsole.log(FindProxyForURL("{url}", "media.example.com"))'
             self.assertEqual(subprocess.check_output(["node", "-e", js], text=True).strip(), expected)
         self.assertFalse(re.fullmatch(tls_pattern([]),"example.org:443"))
+
+    def test_all_sites(self):
+        scope = ([], True, ["skip.example"])
+        for host, active in [("shop.example", True), ("cdn.shop.example", True), ("skip.example", False),
+                             ("printer.local", False), ("localhost", False), ("127.0.0.1", False)]:
+            js = pac(*scope) + f'\nconsole.log(FindProxyForURL("https://{host}/", "{host}"))'
+            self.assertEqual(subprocess.check_output(["node","-e",js],text=True).startswith("PROXY"), active)
+            self.assertEqual(bool(re.fullmatch(tls_pattern(*scope),host+":443")), active)
 
 if __name__=="__main__":
     unittest.main()

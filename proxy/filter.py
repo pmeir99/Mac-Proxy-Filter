@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import struct
 import sys
 from collections import OrderedDict
@@ -11,7 +12,7 @@ from mitmproxy import ctx, http
 # Keep imports from creating files inside the signed app bundle.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from policy import domains, pac, tls_pattern
+from policy import domains, pac, tls_pattern, host_pattern
 
 LIMIT = 8 * 1024 * 1024
 TYPES = {"image/jpeg", "image/png", "image/webp", "image/avif"}
@@ -19,6 +20,9 @@ TYPES = {"image/jpeg", "image/png", "image/webp", "image/avif"}
 class Filter:
     def __init__(self):
         self.hosts = set(domains(json.loads(os.environ["FILTER_DOMAINS"])))
+        self.scope = (self.hosts, os.environ.get("FILTER_ALL") == "1", json.loads(os.environ.get("FILTER_EXCLUDED","[]")))
+        self.rule = re.compile(host_pattern(*self.scope))
+        self.counts = {"requests": 0, "scanned": 0, "masked": 0, "errors": 0}
         self.cache = OrderedDict()
         self.cost = 0
         self.lock = asyncio.Lock()
@@ -27,7 +31,7 @@ class Filter:
         self.parent_watch = None
 
     def load(self, loader):
-        ctx.options.update(allow_hosts=[tls_pattern(self.hosts)])
+        ctx.options.update(allow_hosts=[tls_pattern(*self.scope)])
 
     async def running(self):
         try:
@@ -51,7 +55,9 @@ class Filter:
         try:
             headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 2)
             valid = headers.split(b"\r\n", 1)[0] in (b"GET /proxy.pac HTTP/1.1", b"GET /proxy.pac HTTP/1.0")
-            status, body = ("200 OK", pac(self.hosts).encode()) if valid else ("404 Not Found", b"")
+            status, body = ("200 OK", pac(*self.scope).encode()) if valid else ("404 Not Found", b"")
+            if headers.split(b"\r\n", 1)[0] == b"GET /status HTTP/1.1":
+                status, body = "200 OK", json.dumps(self.counts).encode()
             writer.write((f"HTTP/1.1 {status}\r\nContent-Type: application/x-ns-proxy-autoconfig\r\n"
                           f"Cache-Control: no-store\r\nConnection: close\r\nContent-Length: {len(body)}\r\n\r\n").encode()+body)
             await writer.drain()
@@ -61,7 +67,7 @@ class Filter:
             writer.close()
 
     def allowed(self, req):
-        return req.host.lower().rstrip(".") in self.hosts and 1 <= req.port <= 65535
+        return bool(self.rule.fullmatch(req.host.lower().rstrip("."))) and 1 <= req.port <= 65535
 
     def http_connect(self, flow):
         if not self.allowed(flow.request):
@@ -71,6 +77,7 @@ class Filter:
         if not self.allowed(flow.request):
             flow.response = http.Response.make(403, b"Outside configured domains")
         else:
+            self.counts["requests"] += 1
             flow.request.stream = True
 
     def responseheaders(self, flow):
@@ -126,9 +133,11 @@ class Filter:
         try:
             masked = await self.analyze(raw)
         except (OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
-            flow.response = http.Response.make(502, b"Local image scan failed", {"Cache-Control":"no-store"})
+            self.counts["errors"] += 1  # Availability-first: preserve the original response.
             return
+        self.counts["scanned"] += 1
         if masked:
+            self.counts["masked"] += 1
             r = flow.response
             for header in ("etag","last-modified","accept-ranges","digest","content-digest","repr-digest","content-md5"):
                 r.headers.pop(header, None)

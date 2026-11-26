@@ -17,14 +17,21 @@ def domains(values):
         result.add(host)
     return sorted(result)
 
-def pac(hosts):
+# All-sites mode applies to public-style DNS names. Local hosts and IP literals stay direct.
+PUBLIC = r"(?![a-z0-9.-]*\.(?:localhost|local|internal|home\.arpa)\.?$)(?:[a-z0-9-]+\.)+[a-z][a-z0-9-]*"
+def host_pattern(hosts, all_sites=False, excluded=()):
+    block = "|".join(re.escape(h) for h in domains(excluded))
+    pattern = PUBLIC if all_sites else "|".join(re.escape(h) for h in domains(hosts)) or "(?!)"
+    return "^" + ("(?!(?:" + block + ")$)" if block else "") + "(?:" + pattern + ")$"
+
+def pac(hosts, all_sites=False, excluded=()):
     return r"""function FindProxyForURL(url, host) {
   host = host.toLowerCase().replace(/\.$/, "");
-  var domains = %s;
   if (!/^https?:/i.test(url)) return "DIRECT";
-  return domains.indexOf(host) >= 0 ? "PROXY 127.0.0.1:17862" : "DIRECT";
-}""" % json.dumps(domains(hosts))
+  return new RegExp(%s).test(host) ? "PROXY 127.0.0.1:17862; DIRECT" : "DIRECT";
+}""" % json.dumps(host_pattern(hosts, all_sites, excluded))
 
-def tls_pattern(hosts):
-    names = "|".join(re.escape(host) for host in domains(hosts))
-    return r"(?i)^(?:" + (names or "(?!)") + r")\.?:[0-9]+$"
+def tls_pattern(hosts, all_sites=False, excluded=()):
+    # Adapt end-of-host assertions to mitmproxy's host:port representation.
+    body = host_pattern(hosts, all_sites, excluded).replace("$", r"(?=\.?:[0-9]+$)")
+    return "(?i)" + body + r"\.?:[0-9]+$"

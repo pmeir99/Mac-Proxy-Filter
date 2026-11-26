@@ -248,6 +248,7 @@ jobs:
           curl -fsSL --retry 3 "$url/astronaut.png" -o "$RUNNER_TEMP/portrait.png"
           curl -fsSL --retry 3 "$url/coffee.png" -o "$RUNNER_TEMP/coffee.png"
           python tests/integration.py "$RUNNER_TEMP/portrait.png" "$RUNNER_TEMP/coffee.png"
+          FILTER_ALL=1 python tests/integration.py "$RUNNER_TEMP/portrait.png" "$RUNNER_TEMP/coffee.png"
       - uses: actions/upload-artifact@v4
         if: always() && steps.claim.outputs.winner == 'true'
         with:
@@ -276,7 +277,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v0.1.3-preview.$GITHUB_RUN_NUMBER" Mac-Proxy-Filter.zip \
+          gh release create "v0.1.4-preview.$GITHUB_RUN_NUMBER" Mac-Proxy-Filter.zip \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
-            --title "Mac Proxy Filter 0.1.3 preview $GITHUB_RUN_NUMBER" \
+            --title "Mac Proxy Filter 0.1.4 preview $GITHUB_RUN_NUMBER" \
             --notes "Self-contained Apple silicon build. Unzip, drag Mac Proxy Filter to Applications, then open it. The proxy engine and its runtime are included. See the README for the one-time HTTPS trust and network settings."
