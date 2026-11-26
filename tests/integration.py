@@ -5,7 +5,7 @@ from zipfile import ZipFile
 import os, json, ssl, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 from PIL import Image, ImageChops
-from browser_compare import compare
+from browser_compare import compare, verify_running_chrome
 
 with tempfile.TemporaryDirectory() as temp:
     work=Path(temp)/"public"
@@ -28,6 +28,13 @@ with tempfile.TemporaryDirectory() as temp:
                     "-subj","/CN=origin.test","-config",str(config),
                     "-keyout",str(state/"key"),"-out",str(state/"cert")],check=True,stderr=subprocess.DEVNULL)
     class Handler(SimpleHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == "/unscanned.jpg":
+                self.send_response(200)
+                self.send_header("Content-Type","image/jpeg")
+                self.end_headers()
+                self.wfile.write((work/"portrait.png").read_bytes())
+            else: super().do_GET()
         def __init__(self,*a,**kw): super().__init__(*a,directory=str(work),**kw)
     origin=ThreadingHTTPServer(("127.0.0.1",18243), Handler)
     tls=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -42,7 +49,9 @@ with tempfile.TemporaryDirectory() as temp:
     bundle=Path(os.environ["FILTER_TEST_APP"]).resolve(strict=True)
     executables=bundle/"Contents/MacOS"
     engine=bundle/"Contents/Helpers/mitmproxy.app/Contents/MacOS/mitmdump"
-    env=dict(os.environ,FILTER_TOKEN="ci-test",FILTER_CAPTURE="1",PYTHONDONTWRITEBYTECODE="1",FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
+    settings=state/"mask.json"
+    settings.write_text("{}")
+    env=dict(os.environ,FILTER_MASK_FILE=str(settings),FILTER_TOKEN="ci-test",FILTER_CAPTURE="1",PYTHONDONTWRITEBYTECODE="1",FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
              FILTER_WORKER=str(executables/"MaskWorker"))
     env.update(PATH="/usr/bin:/bin:/usr/sbin:/sbin")
     env.pop("PYTHONHOME",None)
@@ -121,6 +130,14 @@ with tempfile.TemporaryDirectory() as temp:
                 elif not expected:
                     failures.append((path.name,events[0]["verdict"]))
         assert not failures, failures
+        assert subprocess.check_output(curl+["https://origin.test:18243/unscanned.jpg","-w","%{http_code}"])==b"403"
+        pac=subprocess.check_output(["curl","--silent","--noproxy","*","http://127.0.0.1:17861/proxy.pac?revision=test"])
+        assert b"FindProxyForURL" in pac
+        settings.write_text(json.dumps({"FILTER_STYLE":"Cover","FILTER_COLOR":"FD019C","FILTER_SHAPE":"Rectangle"}))
+        recolored=subprocess.check_output(curl+["--fail","https://origin.test:18243/portrait.png"])
+        assert recolored!=(work/"out-portrait.png").read_bytes()
+        assert Image.open(BytesIO(recolored)).convert("RGB").getpixel((220,100))[0]>245
+        settings.write_text("{}")
         diagnostic=["curl","--fail","--silent","--noproxy","*","-H","Authorization: Bearer ci-test"]
         export_url="http://127.0.0.1:17861/export"
         assert subprocess.run(["curl","--fail","--silent","--noproxy","*",export_url],capture_output=True).returncode != 0
@@ -131,6 +148,7 @@ with tempfile.TemporaryDirectory() as temp:
         with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?site=unrelated.test"]))) as report:
             assert json.loads(report.read("manifest.json"))==[]
         compare(work)
+        if env.get("FILTER_ALL") != "1" and os.getenv("GITHUB_ACTIONS") == "true": verify_running_chrome(work)
         stats=json.loads(subprocess.check_output(["curl","--noproxy","*","--silent","http://127.0.0.1:17861/status"]))
         assert stats["scanned"] >= 3 and stats["masked"] >= 2, stats
         subprocess.run(["codesign","--verify","--deep","--strict",str(bundle)], check=True)

@@ -49,11 +49,11 @@ cat > "$app/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Mac Proxy Filter</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>2</string>
-<key>CFBundleShortVersionString</key><string>0.1.6</string>
+<key>CFBundleShortVersionString</key><string>0.1.7</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict></plist>
 PLIST
-/usr/libexec/PlistBuddy -c "Add :FilterRelease string v0.1.6-preview.${RELEASE_NUMBER:-0}" "$app/Info.plist"
+/usr/libexec/PlistBuddy -c "Add :FilterRelease string v0.1.7-preview.${RELEASE_NUMBER:-0}" "$app/Info.plist"
 codesign --force --sign - "$app/MacOS/MaskWorker"
 codesign --force --sign - "${app%/Contents}"
 codesign --verify --deep --strict "${app%/Contents}"

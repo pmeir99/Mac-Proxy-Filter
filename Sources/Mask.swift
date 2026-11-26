@@ -129,7 +129,25 @@ func scan(_ bytes: Data) throws -> Data {
         try handler.perform([people,faces])
         let boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
                     + (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
-        let union = boxes.reduce(CGRect.null) { $0.union($1) }
+        var union = boxes.reduce(CGRect.null) { $0.union($1) }
+        if union.isNull && max(w,h) <= 96 {
+            // A tightly cropped head may meet the input edge. Give the face
+            // detector neutral context, then map its box back into source space.
+            let border = CGFloat(max(pw,ph))/4
+            let extent = CGRect(x:-border,y:-border,width:CGFloat(pw)+2*border,height:CGFloat(ph)+2*border)
+            let framed = CIImage(cgImage:enlarged).composited(over:CIImage(color:CIColor(red:0.5,green:0.5,blue:0.5))).cropped(to:extent)
+            if let padded = context.createCGImage(framed,from:extent) {
+                let retry = VNDetectFaceRectanglesRequest()
+                try VNImageRequestHandler(cgImage:padded,options:[:]).perform([retry])
+                for face in retry.results ?? [] where face.confidence >= 0.6 {
+                    let b = face.boundingBox
+                    let source = CGRect(x:(b.minX*extent.width-border)/CGFloat(pw),
+                        y:(b.minY*extent.height-border)/CGFloat(ph),
+                        width:b.width*extent.width/CGFloat(pw),height:b.height*extent.height/CGFloat(ph))
+                    union = union.union(source.intersection(CGRect(x:0,y:0,width:1,height:1)))
+                }
+            }
+        }
         if !union.isNull { fallback = union }
     }
     guard x1 >= 0 || fallback != nil else { return Data() }

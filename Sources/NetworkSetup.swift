@@ -12,6 +12,11 @@ enum NetworkSetup {
         NSError(domain: "MacProxyFilter", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
     }
 
+    static func owns(_ value: Any?) -> Bool {
+        guard let value = value as? String else { return false }
+        return value == url || value.hasPrefix(url + "?revision=")
+    }
+
     static func apply(enable: Bool) throws -> String {
         var authorization: AuthorizationRef?
         guard AuthorizationCreate(nil, nil, [], &authorization) == errAuthorizationSuccess,
@@ -24,17 +29,18 @@ enum NetworkSetup {
         guard let services = SCNetworkServiceCopyAll(prefs) as? [SCNetworkService] else {
             throw failure("Could not read network services.")
         }
+        let refreshed = url + "?revision=" + UUID().uuidString
         var changed = 0
         var configured = 0
         var skipped = [String]()
         for service in services {
             guard let proto = SCNetworkServiceCopyProtocol(service, kSCNetworkProtocolTypeProxies) else { continue }
             var config = SCNetworkProtocolGetConfiguration(proto) as? [String: Any] ?? [:]
-            let ours = config[address] as? String == url
+            let ours = owns(config[address])
             if enable {
-                if ours && config[enabled] as? Int == 1 { configured += 1; continue }
+
                 let competing = ["HTTPEnable","HTTPSEnable","SOCKSEnable","ProxyAutoDiscoveryEnable","FTPEnable","RTSPEnable"]
-                if config[marker] != nil || competing.contains(where: { config[$0] as? Int == 1 }) ||
+                if (!ours && config[marker] != nil) || competing.contains(where: { config[$0] as? Int == 1 }) ||
                     (!ours && config[enabled] as? Int == 1) {
                     skipped.append((SCNetworkServiceGetName(service) as String?) ?? "Unnamed service")
                     continue
@@ -42,9 +48,9 @@ enum NetworkSetup {
                 var previous = [String: Any]()
                 previous[enabled] = config[enabled]
                 previous[address] = config[address]
-                config[marker] = previous
+                if config[marker] == nil { config[marker] = previous }
                 config[enabled] = 1
-                config[address] = url
+                config[address] = refreshed
                 configured += 1
             } else {
                 guard ours, let previous = config[marker] as? [String: Any] else { continue }

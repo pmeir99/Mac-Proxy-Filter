@@ -90,7 +90,7 @@ final class Controller: ObservableObject {
         let url = URL(string: "http://127.0.0.1:17861/status")!
         while process === child {
             let proxies = SCDynamicStoreCopyProxies(nil) as? [String: Any] ?? [:]
-            let routed = proxies[NetworkSetup.enabled] as? Int == 1 && proxies[NetworkSetup.address] as? String == NetworkSetup.url
+            let routed = proxies[NetworkSetup.enabled] as? Int == 1 && NetworkSetup.owns(proxies[NetworkSetup.address])
             do {
                 let (data, _) = try await URLSession.shared.data(from: url)
                 let counts = try JSONDecoder().decode([String:Int].self, from: data)
@@ -106,6 +106,16 @@ final class Controller: ObservableObject {
             } catch { if process === child { activity = "Waiting for local proxy diagnostics…" } }
             try? await Task.sleep(nanoseconds: 2_000_000_000)
         }
+    }
+
+    func saveMaskSettings() {
+        let prefs = UserDefaults.standard
+        var values = [String:String]()
+        for (key,variable) in [("maskStyle","STYLE"),("maskShape","SHAPE"),("maskMargin","MARGIN"),("maskStrength","STRENGTH"),("maskColor","COLOR")] {
+            if let value = prefs.object(forKey:key) { values["FILTER_"+variable] = String(describing:value) }
+        }
+        do { try JSONEncoder().encode(values).write(to:directory.appendingPathComponent("mask.json"),options:.atomic) }
+        catch { setupMessage = error.localizedDescription }
     }
 
     func start() {
@@ -153,6 +163,8 @@ final class Controller: ObservableObject {
                 if let value = prefs.object(forKey:key) { environment["FILTER_"+variable] = String(describing:value) }
             }
             events = []
+            saveMaskSettings()
+            environment["FILTER_MASK_FILE"] = directory.appendingPathComponent("mask.json").path
             environment["FILTER_ALL"] = allSites ? "1" : "0"
             environment["FILTER_EXCLUDED"] = String(decoding:try JSONEncoder().encode(excluded),as:UTF8.self)
             environment["FILTER_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
@@ -206,13 +218,18 @@ final class Controller: ObservableObject {
     }
 }
 
+final class WindowLifecycle: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
+}
+
 @main
 struct FilterApp: App {
+    @NSApplicationDelegateAdaptor(WindowLifecycle.self) private var windowLifecycle
     @StateObject private var model = Controller()
     @AppStorage("backgroundMode") var backgroundMode = false
     @Environment(\.openWindow) var openWindow
     var body: some Scene {
-        Window("Mac Proxy Filter", id:"main") {
+        WindowGroup("Mac Proxy Filter", id:"main") {
             Interface(model:model)
                 .onAppear { model.launch() }
                 .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in

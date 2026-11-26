@@ -47,3 +47,35 @@ def compare(directory):
     assert delta.getpixel((17,17)) == (0,0,0), "Rounded clip changed"
     assert delta.getpixel((90,155)) == (0,0,0), "Foreground overlay changed"
     print("Chrome PAC comparison passed for selected and direct images, tile bounds, circle clip and foreground overlay")
+
+def verify_running_chrome(directory):
+    """Exercise the existing Chrome process with normal macOS proxy discovery on a disposable runner."""
+    import re
+    import subprocess
+    import time
+    def output(*cmd):
+        return subprocess.check_output(cmd,text=True)
+    interface=re.search(r"interface:\s*(\S+)",output("route","-n","get","default")).group(1)
+    order=output("networksetup","-listnetworkserviceorder")
+    service=next(name for name,device in re.findall(r"\(\d+\) ([^\n]+)\n\(Hardware Port: [^\n]*?, Device: ([^)]+)\)",order) if device==interface)
+    if "Enabled: No" not in output("networksetup","-getautoproxyurl",service):
+        raise RuntimeError("Expected a clean runner without an existing PAC")
+    with sync_playwright() as drivers:
+        browser=drivers.chromium.launch(channel="chrome")
+        try:
+            tab=browser.new_page()
+            url="http://origin.test:18280/portrait.png"
+            raw=(directory/"portrait.png").read_bytes()
+            assert tab.goto(url+"?direct").body()==raw
+            output("sudo","networksetup","-setautoproxyurl",service,"http://127.0.0.1:17861/proxy.pac?revision=live")
+            output("sudo","networksetup","-setautoproxystate",service,"on")
+            start=time.monotonic()
+            while time.monotonic()-start<20:
+                if tab.goto(url+"?live="+str(time.monotonic_ns())).body()!=raw:
+                    print(f"Already-running Chrome received masked image after {time.monotonic()-start:.2f}s",flush=True)
+                    break
+                time.sleep(.2)
+            else: raise AssertionError("Running Chrome did not adopt the system PAC")
+        finally:
+            output("sudo","networksetup","-setautoproxystate",service,"off")
+            browser.close()

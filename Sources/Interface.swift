@@ -50,7 +50,7 @@ struct Interface: View {
             }.tabItem { Label("Overview",systemImage:"shield") }
             Form {
                 Section("Appearance") {
-                    if model.active { Text("Stop filtering in Overview to edit mask settings.").font(.callout) }
+                    Text("Changes apply to newly requested images. Reload a page to request its images again.").font(.callout)
                     Picker("Treatment",selection:$style) { Text("Gaussian blur").tag("Blur"); Text("Solid cover").tag("Cover") }.pickerStyle(.segmented)
                     if style == "Blur" { Slider(value:$strength,in:0.05...1) { Text("Blur strength · "+String(Int(strength*100))+"%") } }
                     else { ColorPicker("Cover color",selection:Binding(get:{
@@ -65,7 +65,7 @@ struct Interface: View {
                     Slider(value:$margin,in:0...0.2,step:0.01) { Text("Extra margin · "+String(Int((margin*100).rounded()))+"%") }
                     Text("The rectangle covers the area containing all detected people. Margin is relative to the shorter image dimension.").foregroundStyle(.secondary)
                 }
-            }.disabled(model.active).tabItem { Label("Mask",systemImage:"person.crop.rectangle") }
+            }.onChange(of:[style,shape,String(strength),String(margin),hex]) { _,_ in if model.active { model.saveMaskSettings() } }.tabItem { Label("Mask",systemImage:"person.crop.rectangle") }
             VStack(alignment:.leading,spacing:12) {
                 Toggle("Capture image diagnostics",isOn:$capture).disabled(model.active)
                 Text("Set before starting. Capture keeps original and displayed images locally for up to five minutes, within 64 MiB and 1,500 entries. Exported ZIPs include original unmasked images.").font(.callout).foregroundStyle(.secondary)
