@@ -63,7 +63,6 @@ class Filter:
     async def serve_pac(self, reader, writer):
         try:
             headers = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), 2)
-            valid = headers.split(b"\r\n", 1)[0] in (b"GET /proxy.pac HTTP/1.1", b"GET /proxy.pac HTTP/1.0")
             parts = headers.split(b"\r\n",1)[0].split()
             valid = len(parts)==3 and parts[0]==b"GET" and parts[1].split(b"?",1)[0]==b"/proxy.pac"
             status, body = ("200 OK", pac(*self.scope).encode()) if valid else ("404 Not Found", b"")
@@ -135,7 +134,7 @@ class Filter:
                 elif int(length) > LIMIT: reason = "over size limit"
                 elif r.headers.get("content-encoding","identity").lower() != "identity": reason = "content encoding"
                 else: reason = "response policy"
-                self.journal.add(flow,"Skipped · "+reason)
+                self.journal.add(flow,("Blocked · " if r.status_code==403 and original_status!=403 else "Skipped · ")+reason)
         else:
             flow.metadata["scan"] = True
 
@@ -202,8 +201,9 @@ class Filter:
             return
         try:
             masked = await self.analyze(raw)
+            flow.metadata["mask_settings"] = dict(self.style or ())
         except (OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
-            if self.capture: self.journal.add(flow,"Scan error",raw)
+            if self.capture: self.journal.add(flow,"Blocked: scan error",raw)
             self.counts["errors"] += 1
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
             return

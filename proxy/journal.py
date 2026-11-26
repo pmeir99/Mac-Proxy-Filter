@@ -28,6 +28,8 @@ class Journal:
                    verdict=verdict, mime=flow.response.headers.get("content-type","").split(";")[0],
                    status=flow.response.status_code, elapsedMS=round((time.monotonic()-flow.metadata.get("started",time.monotonic()))*1000),
                    beforeBytes=len(before), afterBytes=len(after or before))
+        if "mask_settings" in flow.metadata: row["maskSettings"] = flow.metadata["mask_settings"]
+        if verdict.startswith("Blocked"): row["afterBytes"] = 0
         self.entries.append((row,before,after))
         self.size += len(before)+len(after)
         self.prune()
@@ -46,7 +48,7 @@ class Journal:
                     ext={"image/jpeg":"jpg","image/png":"png","image/webp":"webp","image/avif":"avif"}.get(row["mime"],"bin")
                     record["before"]=f'images/{row["id"]}-before.{ext}'
                     zip.writestr(record["before"],before)
-                    record["after"]=record["before"]
+                    if row["afterBytes"]: record["after"]=record["before"]
                     if after:
                         record["after"]=f'images/{row["id"]}-after.png'
                         zip.writestr(record["after"],after)

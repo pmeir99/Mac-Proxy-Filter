@@ -27,9 +27,23 @@ with tempfile.TemporaryDirectory() as temp:
     subprocess.run(["/usr/bin/openssl","req","-x509","-newkey","rsa:2048","-nodes","-days","1",
                     "-subj","/CN=origin.test","-config",str(config),
                     "-keyout",str(state/"key"),"-out",str(state/"cert")],check=True,stderr=subprocess.DEVNULL)
+    import select
+    prefix_sent, finish_image = threading.Event(), threading.Event()
+    slow_image=BytesIO()
+    Image.open(work/"portrait.png").convert("RGB").save(slow_image,format="JPEG",progressive=True)
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/unscanned.jpg":
+            if self.path == "/slow.jpg":
+                data=slow_image.getvalue()
+                self.send_response(200)
+                self.send_header("Content-Type","image/jpeg")
+                self.send_header("Content-Length",str(len(data)))
+                self.end_headers()
+                self.wfile.write(data[:len(data)//2])
+                self.wfile.flush()
+                prefix_sent.set()
+                if finish_image.wait(10): self.wfile.write(data[len(data)//2:])
+            elif self.path == "/unscanned.jpg":
                 self.send_response(200)
                 self.send_header("Content-Type","image/jpeg")
                 self.end_headers()
@@ -130,6 +144,13 @@ with tempfile.TemporaryDirectory() as temp:
                 elif not expected:
                     failures.append((path.name,events[0]["verdict"]))
         assert not failures, failures
+        with subprocess.Popen(curl+["--no-buffer","https://origin.test:18243/slow.jpg"],stdout=subprocess.PIPE) as slow:
+            try:
+                assert prefix_sent.wait(5), "Origin did not deliver progressive prefix"
+                assert not select.select([slow.stdout],[],[],0.4)[0], "Browser received bytes before scan"
+            finally: finish_image.set()
+            output,_=slow.communicate(timeout=20)
+            assert output.startswith(b"\x89PNG") and slow.returncode==0
         assert subprocess.check_output(curl+["https://origin.test:18243/unscanned.jpg","-w","%{http_code}"])==b"403"
         pac=subprocess.check_output(["curl","--silent","--noproxy","*","http://127.0.0.1:17861/proxy.pac?revision=test"])
         assert b"FindProxyForURL" in pac
