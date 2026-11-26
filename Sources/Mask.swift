@@ -90,10 +90,10 @@ func scan(_ bytes: Data) throws -> Data {
           let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways:true,
             kCGImageSourceCreateThumbnailWithTransform:true,
-            kCGImageSourceThumbnailMaxPixelSize:1024
+            kCGImageSourceThumbnailMaxPixelSize:min(1024,max(w,h))
           ] as CFDictionary) else { throw ScanFailure.unsupported }
     let buffer: CVPixelBuffer
-    if max(thumb.width, thumb.height) <= 256 {
+    if max(w,h) <= 256 {
         buffer = try SemanticPeople.mask(thumb)
     } else {
         let request = VNGeneratePersonSegmentationRequest()
