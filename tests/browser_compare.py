@@ -61,7 +61,8 @@ def verify_running_chrome(directory):
     if "Enabled: No" not in output("networksetup","-getautoproxyurl",service):
         raise RuntimeError("Expected a clean runner without an existing PAC")
     with sync_playwright() as drivers:
-        browser=drivers.chromium.launch(channel="chrome", headless=False)
+        log=directory.parent/"network-log.json"
+        browser=drivers.chromium.launch(channel="chrome", headless=False,args=["--log-net-log="+str(log)])
         try:
             tab=browser.new_page()
             url="http://origin.test:18280/portrait.png"
@@ -77,7 +78,18 @@ def verify_running_chrome(directory):
                     print(f"Already-running Chrome received masked image after {time.monotonic()-start:.2f}s",flush=True)
                     break
                 time.sleep(.2)
-            else: raise AssertionError("Running Chrome did not adopt the system PAC")
+            else:
+                browser.close()
+                import json
+                net=json.loads(log.read_text())
+                names={v:k for k,v in net["constants"]["logEventTypes"].items()}
+                seen=set()
+                for event in net["events"]:
+                    name=names.get(event["type"],"")
+                    if ("PROXY" in name or "PAC_" in name) and event.get("params"):
+                        seen.add(name+" "+str(event["params"])[:350])
+                print("Proxy diagnostics:",sorted(seen)[:70],flush=True)
+                raise AssertionError("Running Chrome did not adopt the system PAC")
         finally:
             output("sudo","networksetup","-setautoproxystate",service,"off")
             browser.close()
