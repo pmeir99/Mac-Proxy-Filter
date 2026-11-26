@@ -113,14 +113,37 @@ func scan(_ bytes: Data) throws -> Data {
         let row = base.advanced(by: y * CVPixelBufferGetBytesPerRow(buffer)).assumingMemoryBound(to: UInt8.self)
         for x in 0..<width where row[x] >= 128 { if !rectangle { x1 = x; break rows }; x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y) }
     }
-    guard x1 >= 0 else { return Data() }
+    var fallback: CGRect?
+    if x1 < 0 && max(w,h) <= 256 {
+        // Rectangle detectors can still localize a face or person when the pixel classifier is empty.
+        let factor = 512.0 / CGFloat(max(thumb.width,thumb.height))
+        let pw = max(1,Int(CGFloat(thumb.width)*factor)), ph = max(1,Int(CGFloat(thumb.height)*factor))
+        guard let canvas = CGContext(data:nil,width:pw,height:ph,bitsPerComponent:8,bytesPerRow:0,
+                                     space:rgb,bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else { throw ScanFailure.unsupported }
+        canvas.interpolationQuality = .high
+        canvas.draw(thumb,in:CGRect(x:0,y:0,width:pw,height:ph))
+        guard let enlarged = canvas.makeImage() else { throw ScanFailure.unsupported }
+        let people = VNDetectHumanRectanglesRequest()
+        let faces = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(cgImage:enlarged,options:[:])
+        try handler.perform([people,faces])
+        let boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
+                    + (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
+        let union = boxes.reduce(CGRect.null) { $0.union($1) }
+        if !union.isNull { fallback = union }
+    }
+    guard x1 >= 0 || fallback != nil else { return Data() }
     let rect = photo.extent
     var mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace:NSNull()])
         .transformed(by: CGAffineTransform(scaleX: rect.width/CGFloat(width), y: rect.height/CGFloat(height)))
         .transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
     let env = ProcessInfo.processInfo.environment
     let margin = min(0.2,max(0,Double(env["FILTER_MARGIN"] ?? "") ?? 0)) * min(rect.width,rect.height)
-    if env["FILTER_SHAPE"] == "Rectangle" {
+    if let f = fallback {
+        let box = CGRect(x:rect.minX+f.minX*rect.width,y:rect.minY+f.minY*rect.height,
+                         width:f.width*rect.width,height:f.height*rect.height).insetBy(dx:-margin,dy:-margin)
+        mask = CIImage(color:.white).cropped(to:box).composited(over:CIImage(color:.black)).cropped(to:rect)
+    } else if env["FILTER_SHAPE"] == "Rectangle" {
         let sx = rect.width/CGFloat(width), sy = rect.height/CGFloat(height)
         let box = CGRect(x: rect.minX+CGFloat(x0)*sx,y: rect.minY+CGFloat(height-1-y1)*sy,
                          width: CGFloat(x1-x0+1)*sx,height: CGFloat(y1-y0+1)*sy).insetBy(dx:-margin,dy:-margin)
