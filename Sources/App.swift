@@ -10,6 +10,23 @@ final class Controller: ObservableObject {
     @Published var active = false
     let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Mac Proxy Filter", isDirectory: true)
+    @Published var setupMessage = ""
+    @Published var settingUp = false
+
+    func setup(enable: Bool) {
+        guard !settingUp else { return }
+        settingUp = true
+        let cert = certificate
+        Task {
+            do {
+                setupMessage = try await Task.detached {
+                    if enable { try NetworkSetup.trust(cert) }
+                    return try NetworkSetup.apply(enable: enable)
+                }.value
+            } catch { setupMessage = error.localizedDescription }
+            settingUp = false
+        }
+    }
     var process: Process?
     var ready: URL?
     var certificate: URL { directory.appendingPathComponent("mitmproxy-ca-cert.pem") }
@@ -107,6 +124,12 @@ struct FilterApp: App {
                 Section("Local proxy") {
                     Text(model.status)
                     Button(model.active ? "Stop" : "Start") { if model.active { model.stop() } else { model.start() } }
+                    Button("Enable HTTPS filtering on this Mac…") { model.setup(enable: true) }
+                        .disabled(model.settingUp || model.status != "Listening on this Mac")
+                    Text("Approves SSL trust for this account and configures existing network services. Keep the app running while routing is enabled.").font(.caption)
+                    Button("Restore previous network routing…") { model.setup(enable: false) }
+                        .disabled(model.settingUp)
+                    if !model.setupMessage.isEmpty { Text(model.setupMessage).textSelection(.enabled) }
                     Text("Automatic proxy configuration URL").font(.caption)
                     Text("http://127.0.0.1:17861/proxy.pac").textSelection(.enabled)
                     Button("Show public certificate in Finder") {

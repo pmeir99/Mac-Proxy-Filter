@@ -26,7 +26,7 @@ ditto "$engine" "$app/Helpers/mitmproxy.app"
 cp licenses/mitmproxy.txt "$app/Resources/mitmproxy-LICENSE.txt"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 xcrun swiftc -O Sources/Mask.swift -o "$app/MacOS/MaskWorker"
-xcrun swiftc -O -parse-as-library Sources/App.swift -o "$app/MacOS/MacProxyFilter"
+xcrun swiftc -O -parse-as-library Sources/App.swift Sources/NetworkSetup.swift -o "$app/MacOS/MacProxyFilter"
 cp proxy/*.py "$app/Resources/"
 cat > "$app/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -36,7 +36,7 @@ cat > "$app/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>Mac Proxy Filter</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>2</string>
-<key>CFBundleShortVersionString</key><string>0.1.1</string>
+<key>CFBundleShortVersionString</key><string>0.1.2</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict></plist>
 PLIST
