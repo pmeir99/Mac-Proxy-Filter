@@ -58,6 +58,12 @@ with tempfile.TemporaryDirectory() as temp:
         assert ready.exists()
         curl=["curl","--silent","--show-error","--noproxy","","--proxy","http://127.0.0.1:17862",
               "--max-time","30","--cacert",str(conf/"mitmproxy-ca-cert.pem")]
+        # A fresh Mac must reject our unapproved root; the positive tests below
+        # subsequently trust only this fixture's CA for their own process.
+        untrusted = subprocess.run(["/usr/bin/curl","--disable","--silent","--head","--max-time","15",
+            "--proxy","http://127.0.0.1:17862","--noproxy","","https://origin.test:18243/coffee.png"],
+            env={"PATH":"/usr/bin:/bin"}, capture_output=True)
+        assert untrusted.returncode == 60, ("Untrusted test CA was not rejected", untrusted.returncode)
         for name in ["coffee.png","portrait.png","cutout.png"]:
             out=work/("out-"+name)
             started=time.perf_counter()

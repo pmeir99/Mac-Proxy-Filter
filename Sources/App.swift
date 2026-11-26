@@ -16,11 +16,15 @@ final class Controller: ObservableObject {
     func setup(enable: Bool) {
         guard !settingUp else { return }
         settingUp = true
+        let hosts = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
         let cert = certificate
         Task {
             do {
                 setupMessage = try await Task.detached {
-                    if enable { try NetworkSetup.trust(cert) }
+                    if enable {
+                        try NetworkSetup.trust(cert)
+                        for host in Set(hosts).sorted() { try NetworkSetup.checkHTTPS(host: host) }
+                    }
                     return try NetworkSetup.apply(enable: enable)
                 }.value
             } catch { setupMessage = error.localizedDescription }
@@ -118,12 +122,19 @@ struct FilterApp: App {
                 Section("Domains") {
                     Text("Enter one exact destination per line, including image CDN hosts. A shared CDN is filtered wherever it is used.")
                         .foregroundStyle(.secondary)
+                    Button("Use Amazon image hosts") {
+                        let existing = model.text.components(separatedBy: .newlines).map {
+                            $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        }.filter { !$0.isEmpty && !["amazon.com", "www.amazon.com", "m.media-amazon.com"].contains($0) }
+                        model.text = (existing + ["m.media-amazon.com"]).joined(separator: "\n")
+                    }.disabled(model.active || model.settingUp)
+                    Text("This preset routes Amazon’s image CDN and leaves the storefront direct.").font(.caption)
                     TextEditor(text: $model.text).font(.system(.body, design:.monospaced))
-                        .frame(minHeight:95).disabled(model.active)
+                        .frame(minHeight:95).disabled(model.active || model.settingUp)
                 }
                 Section("Local proxy") {
                     Text(model.status)
-                    Button(model.active ? "Stop" : "Start") { if model.active { model.stop() } else { model.start() } }
+                    Button(model.active ? "Stop" : "Start") { if model.active { model.stop() } else { model.start() } }.disabled(model.settingUp)
                     Button("Enable HTTPS filtering on this Mac…") { model.setup(enable: true) }
                         .disabled(model.settingUp || model.status != "Listening on this Mac")
                     Text("Approves SSL trust for this account and configures existing network services. Keep the app running while routing is enabled.").font(.caption)

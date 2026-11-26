@@ -67,10 +67,34 @@ enum NetworkSetup {
         return message
     }
 
+    // Prove that the selected hostname completes TLS through our listener using
+    // native system trust. Do not follow redirects or send browser credentials.
+    static func checkHTTPS(host: String) throws {
+        let task = Process()
+        let output = Pipe()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/curl")
+        task.arguments = ["--disable", "--silent", "--head", "--connect-timeout", "5", "--max-time", "10",
+                          "--proxy", "http://127.0.0.1:17862", "--noproxy", "", "--output", "/dev/null",
+                          "--write-out", "%{http_connect} %{http_code}", "https://" + host + "/"]
+        task.environment = ["PATH": "/usr/bin:/bin"]
+        task.standardOutput = output
+        try task.run()
+        task.waitUntilExit()
+        let response = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        if task.terminationStatus == 60 {
+            throw failure("macOS rejected the HTTPS certificate for " + host + ". Keep browser warnings enabled. Restore previous routing if browsing is interrupted.")
+        }
+        let codes = response.split(separator: " ")
+        guard task.terminationStatus == 0, codes.count == 2, codes[0] == "200",
+              let status = Int(codes[1]), (200..<500).contains(status) else {
+            throw failure("HTTPS check failed for " + host + " (curl " + String(task.terminationStatus) + ", HTTP " + response + "). Restore previous routing if already enabled.")
+        }
+    }
+
     static func trust(_ certificate: URL) throws {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        task.arguments = ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", certificate.path]
+        task.arguments = ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Keychains/login.keychain-db").path, certificate.path]
         try task.run()
         task.waitUntilExit()
         guard task.terminationStatus == 0 else { throw failure("Certificate trust could not be approved. Network routing was left as configured.") }

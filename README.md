@@ -8,6 +8,8 @@ Start with an empty list. Enter one exact destination hostname per line. To chan
 
 For example, if a product page at `shop.example` loads a thumbnail from `images.example`, add `images.example` to cover that thumbnail. Adding only `shop.example` covers images served by the shop host itself. A selected shared CDN is filtered everywhere it is used. Subdomains require their own entries. Chrome DevTools → Network → Img → Request URL shows the actual destination. An embedded data URL has no separate network request.
 
+For Amazon, choose **Use Amazon image hosts** while stopped. This replaces the Amazon storefront entries with its product-image CDN and preserves other sites. Before enabling routing, setup now makes an unauthenticated HTTPS HEAD request through the local proxy to each selected host. A failed check leaves existing routing as configured. To recover from an earlier setup, use **Restore previous network routing…** while the filter is still running, then stop and edit the list.
+
 ## Run on your Mac
 
 1. Download **Mac-Proxy-Filter.zip** from the latest Mac Proxy Filter preview, double-click the ZIP in Finder, drag **Mac Proxy Filter** to Applications, and open it. This Apple silicon app includes its proxy engine and Python runtime and uses the Vision framework supplied by macOS. All user setup is graphical. [Releases](https://github.com/pmeir99/Mac-Proxy-Filter/releases)
