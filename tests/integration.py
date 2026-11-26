@@ -113,7 +113,8 @@ with tempfile.TemporaryDirectory() as temp:
                 print(f"{path.name}: fresh {first_ms:.0f} ms, cached {(time.perf_counter()-started)*1000:.0f} ms",flush=True)
                 assert repeat==served
                 assert Image.open(BytesIO(served)).size==thumb.size
-                assert (served==path.read_bytes())==(name=="coffee"), path.name
+                events=json.loads(subprocess.check_output(["curl","--silent","--noproxy","*","-H","Authorization: Bearer ci-test","http://127.0.0.1:17861/events"]))
+                assert (served==path.read_bytes())==(name=="coffee"), (path.name,events[:2])
         diagnostic=["curl","--fail","--silent","--noproxy","*","-H","Authorization: Bearer ci-test"]
         export_url="http://127.0.0.1:17861/export"
         assert subprocess.run(["curl","--fail","--silent","--noproxy","*",export_url],capture_output=True).returncode != 0

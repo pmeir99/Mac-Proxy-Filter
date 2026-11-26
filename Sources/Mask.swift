@@ -152,7 +152,13 @@ while let header = read(4) {
     let size = header.reduce(0) { $0 * 256 + Int($1) }
     guard size > 0, size <= 8 * 1024 * 1024, let bytes = read(size) else { break }
     autoreleasepool {
-        let result = try? scan(bytes)
+        let result: Data?
+        do { result = try scan(bytes) }
+        catch {
+            let error = error as NSError
+            FileHandle.standardError.write(Data("Scan unavailable (\(error.domain) \(error.code))\n".utf8))
+            result = nil
+        }
         var count = (result.map { UInt32($0.count) } ?? UInt32.max).bigEndian
         withUnsafeBytes(of: &count) { output.write(Data($0)) }
         if let result { output.write(result) }
