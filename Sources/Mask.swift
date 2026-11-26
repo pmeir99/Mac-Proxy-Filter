@@ -56,7 +56,7 @@ func scan(_ bytes: Data) throws -> Data {
         let row = base.advanced(by: y * CVPixelBufferGetBytesPerRow(buffer)).assumingMemoryBound(to: UInt8.self)
         for x in 0..<width where row[x] >= 128 { if !rectangle { x1 = x; break rows }; x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y) }
     }
-    guard x1 >= x0 else { return Data() }
+    guard x1 >= 0 else { return Data() }
     let rect = photo.extent
     var mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace:NSNull()])
         .transformed(by: CGAffineTransform(scaleX: rect.width/CGFloat(width), y: rect.height/CGFloat(height)))

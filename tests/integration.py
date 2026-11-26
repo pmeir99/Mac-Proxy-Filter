@@ -105,7 +105,13 @@ with tempfile.TemporaryDirectory() as temp:
                 thumb.thumbnail((edge,edge))
                 path=work/f"{name}-{edge}.jpg"
                 thumb.save(path,quality=75)
+                started=time.perf_counter()
                 served=subprocess.check_output(curl+["--fail","https://origin.test:18243/"+path.name])
+                first_ms=(time.perf_counter()-started)*1000
+                started=time.perf_counter()
+                repeat=subprocess.check_output(curl+["--fail","https://origin.test:18243/"+path.name])
+                print(f"{path.name}: fresh {first_ms:.0f} ms, cached {(time.perf_counter()-started)*1000:.0f} ms",flush=True)
+                assert repeat==served
                 assert Image.open(BytesIO(served)).size==thumb.size
                 assert (served==path.read_bytes())==(name=="coffee"), path.name
         diagnostic=["curl","--fail","--silent","--noproxy","*","-H","Authorization: Bearer ci-test"]
