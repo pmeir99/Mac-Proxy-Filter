@@ -42,18 +42,32 @@ func scan(_ bytes: Data) throws -> Data {
     defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
     guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw ScanFailure.unsupported }
     let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
-    var detected = false
+    var x0 = width, x1 = -1, y0 = height, y1 = -1
     for y in 0..<height {
         let row = base.advanced(by: y * CVPixelBufferGetBytesPerRow(buffer)).assumingMemoryBound(to: UInt8.self)
-        if (0..<width).contains(where: { row[$0] >= 128 }) { detected = true; break }
+        for x in 0..<width where row[x] >= 128 { x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y) }
     }
-    guard detected else { return Data() }
+    guard x1 >= x0 else { return Data() }
     let rect = photo.extent
-    let mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace:NSNull()])
+    var mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace:NSNull()])
         .transformed(by: CGAffineTransform(scaleX: rect.width/CGFloat(width), y: rect.height/CGFloat(height)))
         .transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
-    let blurred = photo.clampedToExtent().applyingGaussianBlur(sigma: max(6, min(45, rect.width * 0.035))).cropped(to: rect)
-    let painted = blurred.applyingFilter("CIBlendWithMask", parameters: [
+    let env = ProcessInfo.processInfo.environment
+    let margin = min(0.2,max(0,Double(env["FILTER_MARGIN"] ?? "") ?? 0)) * min(rect.width,rect.height)
+    if env["FILTER_SHAPE"] == "Rectangle" {
+        let sx = rect.width/CGFloat(width), sy = rect.height/CGFloat(height)
+        let box = CGRect(x: rect.minX+CGFloat(x0)*sx,y: rect.minY+CGFloat(height-1-y1)*sy,
+                         width: CGFloat(x1-x0+1)*sx,height: CGFloat(y1-y0+1)*sy).insetBy(dx:-margin,dy:-margin)
+        mask = CIImage(color:.white).cropped(to:box).composited(over:CIImage(color:.black)).cropped(to:rect)
+    } else if margin > 0 {
+        mask = mask.applyingFilter("CIMorphologyMaximum",parameters:["inputRadius":margin]).cropped(to:rect)
+    }
+    let strength = min(1,max(0.05,Double(env["FILTER_STRENGTH"] ?? "") ?? 0.35))
+    let blurred = photo.clampedToExtent().applyingGaussianBlur(sigma: max(2, min(150, rect.width * strength * 0.1))).cropped(to: rect)
+    let hex = UInt32(env["FILTER_COLOR"] ?? "222222",radix:16) ?? 0x222222
+    let fill = CIColor(red:CGFloat((hex>>16)&255)/255,green:CGFloat((hex>>8)&255)/255,blue:CGFloat(hex&255)/255)
+    let foreground = env["FILTER_STYLE"] == "Cover" ? CIImage(color:fill).cropped(to:rect) : blurred
+    let painted = foreground.applyingFilter("CIBlendWithMask", parameters: [
         kCIInputBackgroundImageKey: photo, kCIInputMaskImageKey: mask
     ]).cropped(to: rect)
     // Compositing the blur can otherwise smear the alpha channel at cutout edges.

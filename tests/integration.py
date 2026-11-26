@@ -1,5 +1,7 @@
 """CI uses private temporary trust and a local HTTPS origin on an isolated runner."""
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+from io import BytesIO
+from zipfile import ZipFile
 import os, json, ssl, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 from PIL import Image, ImageChops
@@ -40,7 +42,7 @@ with tempfile.TemporaryDirectory() as temp:
     bundle=Path(os.environ["FILTER_TEST_APP"]).resolve(strict=True)
     executables=bundle/"Contents/MacOS"
     engine=bundle/"Contents/Helpers/mitmproxy.app/Contents/MacOS/mitmdump"
-    env=dict(os.environ,PYTHONDONTWRITEBYTECODE="1",FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
+    env=dict(os.environ,FILTER_TOKEN="ci-test",FILTER_CAPTURE="1",PYTHONDONTWRITEBYTECODE="1",FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
              FILTER_WORKER=str(executables/"MaskWorker"))
     env.update(PATH="/usr/bin:/bin:/usr/sbin:/sbin")
     env.pop("PYTHONHOME",None)
@@ -86,6 +88,15 @@ with tempfile.TemporaryDirectory() as temp:
                 assert delta.getpixel((2,2))==(0,0,0),"Corner changed"
         veto=subprocess.run(curl+["--fail","https://elsewhere.test/"],capture_output=True)
         assert veto.returncode and b"403" in veto.stderr,veto.stderr
+        diagnostic=["curl","--fail","--silent","--noproxy","*","-H","Authorization: Bearer ci-test"]
+        export_url="http://127.0.0.1:17861/export"
+        assert subprocess.run(["curl","--fail","--silent","--noproxy","*",export_url],capture_output=True).returncode != 0
+        with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?site=origin.test"]))) as report:
+            rows=json.loads(report.read("manifest.json"))
+            assert any(r["verdict"]=="Masked" and report.read(r["after"])==(work/"out-portrait.png").read_bytes()
+                       and report.read(r["before"])==(work/"portrait.png").read_bytes() for r in rows)
+        with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?site=unrelated.test"]))) as report:
+            assert json.loads(report.read("manifest.json"))==[]
         compare(work)
         stats=json.loads(subprocess.check_output(["curl","--noproxy","*","--silent","http://127.0.0.1:17861/status"]))
         assert stats["scanned"] >= 3 and stats["masked"] >= 2, stats

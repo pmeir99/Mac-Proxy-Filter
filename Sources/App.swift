@@ -14,6 +14,17 @@ final class Controller: ObservableObject {
         didSet { UserDefaults.standard.set(exceptions, forKey: "exceptions") }
     }
     @Published var activity = ""
+    @Published var events = [Event]()
+    private var token = ""
+    func diagnostics(_ path:String,site:String = "") async throws -> Data {
+        var components = URLComponents(string:"http://127.0.0.1:17861/"+path)!
+        components.queryItems = [URLQueryItem(name:"site",value:site)]
+        var request = URLRequest(url:components.url!)
+        request.setValue("Bearer "+token,forHTTPHeaderField:"Authorization")
+        let (data,response) = try await URLSession.shared.data(for:request)
+        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw NetworkSetup.failure("Diagnostics unavailable") }
+        return data
+    }
     private var setupAfterStart = false
     @Published var status = "Stopped"
     @Published var active = false
@@ -60,6 +71,11 @@ final class Controller: ObservableObject {
                 let (data, _) = try await URLSession.shared.data(from: url)
                 let counts = try JSONDecoder().decode([String:Int].self, from: data)
                 guard process === child else { return }
+                if UserDefaults.standard.bool(forKey:"capture") {
+                    let recent = try await diagnostics("events")
+                    guard process === child else { return }
+                    events = try JSONDecoder().decode([Event].self,from:recent)
+                }
                 let n = counts["requests", default: 0]
                 let label = routed ? "Enabled on current network" : "Running • current network routing unconfirmed"
                 activity = label + " · " + String(n) + " requests · " + String(counts["scanned", default: 0]) + " images scanned · " + String(counts["masked", default: 0]) + " masked · " + String(counts["errors", default: 0]) + " scan errors"
@@ -105,6 +121,14 @@ final class Controller: ObservableObject {
             environment.removeValue(forKey: "PYTHONPATH")
             environment["PYTHONDONTWRITEBYTECODE"] = "1"
             environment["FILTER_DOMAINS"] = String(decoding:try JSONEncoder().encode(allSites ? [] : hosts),as:UTF8.self)
+            self.token = UUID().uuidString
+            environment["FILTER_TOKEN"] = self.token
+            let prefs = UserDefaults.standard
+            environment["FILTER_CAPTURE"] = prefs.bool(forKey:"capture") ? "1" : "0"
+            for (key,variable) in [("maskStyle","STYLE"),("maskShape","SHAPE"),("maskMargin","MARGIN"),("maskStrength","STRENGTH"),("maskColor","COLOR")] {
+                if let value = prefs.object(forKey:key) { environment["FILTER_"+variable] = String(describing:value) }
+            }
+            events = []
             environment["FILTER_ALL"] = allSites ? "1" : "0"
             environment["FILTER_EXCLUDED"] = String(decoding:try JSONEncoder().encode(excluded),as:UTF8.self)
             environment["FILTER_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
@@ -146,6 +170,7 @@ final class Controller: ObservableObject {
 
     func stop() {
         activity = ""
+        events = []
         setupAfterStart = false
         if let process, process.isRunning { process.terminate(); process.waitUntilExit() }
         if let ready { try? FileManager.default.removeItem(at: ready) }
@@ -160,33 +185,7 @@ struct FilterApp: App {
     @StateObject private var model = Controller()
     var body: some Scene {
         WindowGroup("Mac Proxy Filter") {
-            Form {
-                Section("Domains") {
-                    Toggle("Filter all public websites", isOn: $model.allSites).disabled(model.active)
-                    if !model.allSites {
-                        Text("Filter these destination hosts, one per line")
-                        TextEditor(text: $model.text).frame(minHeight:60).disabled(model.active)
-                    }
-                    Text("Always connect directly to these hosts, one per line")
-                    TextEditor(text: $model.exceptions).frame(minHeight:45).disabled(model.active)
-                }
-                Section("Local proxy") {
-                    Text(model.status)
-                    if model.active { Text(model.activity).textSelection(.enabled) }
-                    Button(model.active ? "Stop" : "Enable filtering…") { if model.active { model.stop() } else { model.enableFromStopped() } }.disabled(model.settingUp)
-                    Button("Check or repair setup…") { model.setup(enable: true) }
-                        .disabled(model.settingUp || model.status != "Listening on this Mac")
-                    Text("Approves SSL trust for this account and configures existing network services. Keep the app running while routing is enabled.").font(.caption)
-                    Button("Restore previous network routing…") { model.setup(enable: false) }
-                        .disabled(model.settingUp)
-                    if !model.setupMessage.isEmpty { Text(model.setupMessage).textSelection(.enabled) }
-                    Text("Automatic proxy configuration URL").font(.caption)
-                    Text("http://127.0.0.1:17861/proxy.pac").textSelection(.enabled)
-                    Button("Show public certificate in Finder") {
-                        NSWorkspace.shared.activateFileViewerSelecting([model.certificate])
-                    }.disabled(!model.active || !FileManager.default.fileExists(atPath:model.certificate.path))
-                }
-            }.formStyle(.grouped).frame(minWidth:480,minHeight:420)
+            Interface(model:model)
             .onReceive(NotificationCenter.default.publisher(for:NSApplication.willTerminateNotification)) { _ in model.stop() }
         }
     }

@@ -26,20 +26,31 @@ ditto "$engine" "$app/Helpers/mitmproxy.app"
 cp licenses/mitmproxy.txt "$app/Resources/mitmproxy-LICENSE.txt"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 xcrun swiftc -O Sources/Mask.swift -o "$app/MacOS/MaskWorker"
-xcrun swiftc -O -parse-as-library Sources/App.swift Sources/NetworkSetup.swift -o "$app/MacOS/MacProxyFilter"
+xcrun swiftc -O -parse-as-library Sources/App.swift Sources/NetworkSetup.swift Sources/Interface.swift Sources/Updates.swift -o "$app/MacOS/MacProxyFilter"
+mkdir -p "$stage/Filter.iconset"
+for size in 16 32 128 256 512; do
+  for scale in 1 2; do
+    suffix=""; [[ $scale == 1 ]] || suffix="@2x"
+    sips -z "$((size*scale))" "$((size*scale))" artwork/Filter.png --out "$stage/Filter.iconset/icon_${size}x${size}${suffix}.png" >/dev/null
+  done
+done
+iconutil -c icns "$stage/Filter.iconset" -o "$app/Resources/Filter.icns"
+cp install-update.sh "$app/Resources/"
 cp proxy/*.py "$app/Resources/"
 cat > "$app/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
 <key>CFBundleExecutable</key><string>MacProxyFilter</string>
 <key>CFBundleIdentifier</key><string>com.pmeir99.mac-proxy-filter</string>
+<key>CFBundleIconFile</key><string>Filter.icns</string>
 <key>CFBundleName</key><string>Mac Proxy Filter</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleVersion</key><string>2</string>
-<key>CFBundleShortVersionString</key><string>0.1.4</string>
+<key>CFBundleShortVersionString</key><string>0.1.5</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 </dict></plist>
 PLIST
+/usr/libexec/PlistBuddy -c "Add :FilterRelease string v0.1.5-preview.${RELEASE_NUMBER:-0}" "$app/Info.plist"
 codesign --force --sign - "$app/MacOS/MaskWorker"
 codesign --force --sign - "${app%/Contents}"
 codesign --verify --deep --strict "${app%/Contents}"
