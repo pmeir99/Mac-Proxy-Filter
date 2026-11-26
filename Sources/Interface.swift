@@ -41,6 +41,7 @@ struct Interface: View {
             }.tabItem { Label("Overview",systemImage:"shield") }
             Form {
                 Section("Appearance") {
+                    if model.active { Text("Stop filtering in Overview to edit mask settings.").font(.callout) }
                     Picker("Treatment",selection:$style) { Text("Gaussian blur").tag("Blur"); Text("Solid cover").tag("Cover") }.pickerStyle(.segmented)
                     if style == "Blur" { Slider(value:$strength,in:0.05...1) { Text("Blur strength · "+String(Int(strength*100))+"%") } }
                     else { ColorPicker("Cover color",selection:Binding(get:{
@@ -104,7 +105,7 @@ struct Interface: View {
                 let staging = installed.deletingLastPathComponent().appendingPathComponent(".filter-"+UUID().uuidString)
                 try FileManager.default.copyItem(at:fresh,to:staging)
                 p.arguments![1] = staging.path
-                try p.run(); model.stop(); NSApp.terminate(nil)
+                try p.run(); UserDefaults.standard.set(model.active,forKey:"resumeAfterUpdate"); model.stop(); NSApp.terminate(nil)
             } catch { notice = error.localizedDescription }
         }
     }

@@ -51,6 +51,17 @@ with tempfile.TemporaryDirectory() as temp:
     if env.get("FILTER_ALL") == "1":
         env["FILTER_DOMAINS"] = "[]"
         env["FILTER_EXCLUDED"] = json.dumps(["outside.test", "elsewhere.test"])
+    if env.get("FILTER_ALL") == "1":
+        # Exercise the relaxed shape independently of the HTTP comparison.
+        source=(work/"portrait.png").read_bytes()
+        def covered(margin):
+            frame=subprocess.check_output([env["FILTER_WORKER"]],input=len(source).to_bytes(4,"big")+source,
+                env=dict(env,FILTER_STYLE="Cover", FILTER_COLOR="FD019C", FILTER_SHAPE="Rectangle", FILTER_MARGIN=margin))
+            assert int.from_bytes(frame[:4],"big")==len(frame)-4
+            image=Image.open(BytesIO(frame[4:])).convert("RGB")
+            return sum(r>245 and g<8 and abs(b-156)<8 for r,g,b in image.getdata())
+        tight=covered("0")
+        assert tight>10000 and covered("0.1")>tight, "Rectangle or configurable padding failed"
     proxy=subprocess.Popen([engine,"--quiet","--set","onboarding=false","--listen-host","127.0.0.1","-p","17862",
         "--set","connection_strategy=lazy","--set","confdir="+str(conf),
         "--set","ssl_verify_upstream_trusted_ca="+str(state/"cert"),

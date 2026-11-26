@@ -186,6 +186,12 @@ struct FilterApp: App {
     var body: some Scene {
         WindowGroup("Mac Proxy Filter") {
             Interface(model:model)
+                .onAppear {
+                    if UserDefaults.standard.bool(forKey:"resumeAfterUpdate") {
+                        UserDefaults.standard.removeObject(forKey:"resumeAfterUpdate")
+                        model.enableFromStopped()
+                    }
+                }
             .onReceive(NotificationCenter.default.publisher(for:NSApplication.willTerminateNotification)) { _ in model.stop() }
         }
     }
