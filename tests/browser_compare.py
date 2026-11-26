@@ -62,7 +62,7 @@ def verify_running_chrome(directory):
         raise RuntimeError("Expected a clean runner without an existing PAC")
     with sync_playwright() as drivers:
         log=directory.parent/"network-log.json"
-        browser=drivers.chromium.launch(channel="chrome", headless=False,args=["--log-net-log="+str(log)])
+        browser=drivers.chromium.launch_persistent_context(str(directory.parent/"chrome-profile"),channel="chrome", headless=False,args=["--log-net-log="+str(log)])
         try:
             tab=browser.new_page()
             url="http://origin.test:18280/portrait.png"
