@@ -22,6 +22,11 @@ func read(_ count: Int) -> Data? {
 }
 
 enum SemanticPeople {
+    static let detector: VNCoreMLModel? = {
+        let resources = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
+        guard let model = try? MLModel(contentsOf:resources.appendingPathComponent("YOLOv3Int8LUT.mlmodelc")) else { return nil }
+        return try? VNCoreMLModel(for:model)
+    }()
     private static let model: VNCoreMLModel? = {
         let resources = URL(fileURLWithPath: CommandLine.arguments[0])
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
@@ -129,13 +134,13 @@ func scan(_ bytes: Data) throws -> Data {
         try handler.perform([people,faces])
         var boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
                     + (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
-        if boxes.isEmpty {
-            let detector = CIDetector(ofType:CIDetectorTypeFace,context:context,
-                                      options:[CIDetectorAccuracy:CIDetectorAccuracyHigh])
-            let image = CIImage(cgImage:enlarged)
-            boxes = (detector?.features(in:image) ?? []).map {
-                CGRect(x:$0.bounds.minX/CGFloat(pw),y:$0.bounds.minY/CGFloat(ph),
-                       width:$0.bounds.width/CGFloat(pw),height:$0.bounds.height/CGFloat(ph))
+        if boxes.isEmpty, let model = SemanticPeople.detector {
+            let objects = VNCoreMLRequest(model:model)
+            objects.imageCropAndScaleOption = .scaleFill
+            try handler.perform([objects])
+            boxes = (objects.results as? [VNRecognizedObjectObservation] ?? []).compactMap {
+                guard let label = $0.labels.first, label.identifier == "person", label.confidence >= 0.4 else { return nil }
+                return $0.boundingBox
             }
         }
         let union = boxes.reduce(CGRect.null) { $0.union($1) }

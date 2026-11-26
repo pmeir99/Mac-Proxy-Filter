@@ -27,6 +27,8 @@ cp licenses/mitmproxy.txt "$app/Resources/mitmproxy-LICENSE.txt"
 curl -fsSL --retry 3 'https://ml-assets.apple.com/coreml/models/Image/ImageSegmentation/DeepLabV3/DeepLabV3FP16.mlmodel' -o "$stage/DeepLabV3FP16.mlmodel"
 echo "6c2c8cbe1c2d765f231408458b8c273976039ae04a05b112d748fc21cb3bfe95  $stage/DeepLabV3FP16.mlmodel" | shasum -a 256 -c -
 xcrun coremlcompiler compile "$stage/DeepLabV3FP16.mlmodel" "$app/Resources"
+curl -fsSL --retry 3 'https://ml-assets.apple.com/coreml/models/Image/ObjectDetection/YOLOv3/YOLOv3Int8LUT.mlmodel' -o "$stage/YOLOv3Int8LUT.mlmodel"
+xcrun coremlcompiler compile "$stage/YOLOv3Int8LUT.mlmodel" "$app/Resources"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 xcrun swiftc -O Sources/Mask.swift -o "$app/MacOS/MaskWorker"
 xcrun swiftc -O -parse-as-library Sources/App.swift Sources/NetworkSetup.swift Sources/Interface.swift Sources/Updates.swift -o "$app/MacOS/MacProxyFilter"
