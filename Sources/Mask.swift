@@ -1,5 +1,6 @@
 import Foundation
 import CoreImage
+import CoreML
 import ImageIO
 import Vision
 import UniformTypeIdentifiers
@@ -20,6 +21,64 @@ func read(_ count: Int) -> Data? {
     return data
 }
 
+enum SemanticPeople {
+    private static let model: VNCoreMLModel? = {
+        let resources = URL(fileURLWithPath: CommandLine.arguments[0])
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .all
+        guard let compiled = try? MLModel(contentsOf: resources.appendingPathComponent("DeepLabV3FP16.mlmodelc"),
+                                          configuration: configuration) else { return nil }
+        return try? VNCoreMLModel(for: compiled)
+    }()
+
+    static func mask(_ image: CGImage) throws -> CVPixelBuffer {
+        guard let model else { throw ScanFailure.unsupported }
+        let request = VNCoreMLRequest(model: model)
+        request.imageCropAndScaleOption = .scaleFill
+        try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        guard let result = request.results?.first as? VNCoreMLFeatureValueObservation,
+              let labels = result.featureValue.multiArrayValue,
+              labels.shape.count >= 2, labels.shape.dropLast(2).allSatisfy({ $0.intValue == 1 }) else {
+            throw ScanFailure.unsupported
+        }
+        let dims = labels.shape.suffix(2).map(\.intValue)
+        let steps = labels.strides.suffix(2).map(\.intValue)
+        let h = dims[0], w = dims[1]
+        guard w>0, h>0, w<=1024, h<=1024 else { throw ScanFailure.unsupported }
+        var buffer: CVPixelBuffer?
+        guard CVPixelBufferCreate(nil,w,h,kCVPixelFormatType_OneComponent8,nil,&buffer)==kCVReturnSuccess,
+              let buffer else { throw ScanFailure.unsupported }
+        CVPixelBufferLockBaseAddress(buffer, [])
+        guard let destination = CVPixelBufferGetBaseAddress(buffer) else {
+            CVPixelBufferUnlockBaseAddress(buffer, [])
+            throw ScanFailure.unsupported
+        }
+        let output = destination.assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(buffer)
+        func copyLabels<T: BinaryInteger>(_ input: UnsafePointer<T>) {
+            for y in 0..<h {
+                for x in 0..<w {
+                    let person = input[y*steps[0]+x*steps[1]] == 15
+                    output[y*stride+x] = person ? 255 : 0
+                }
+            }
+        }
+        if labels.dataType == .int32 {
+            copyLabels(UnsafePointer(labels.dataPointer.assumingMemoryBound(to: Int32.self)))
+        } else {
+            for y in 0..<h {
+                for x in 0..<w {
+                    let person = labels[y*steps[0]+x*steps[1]].intValue == 15
+                    output[y*stride+x] = person ? 255 : 0
+                }
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(buffer, [])
+        return buffer
+    }
+}
+
 func scan(_ bytes: Data) throws -> Data {
     guard let src = CGImageSourceCreateWithData(bytes as CFData, nil),
           CGImageSourceGetCount(src) == 1,
@@ -33,19 +92,17 @@ func scan(_ bytes: Data) throws -> Data {
             kCGImageSourceCreateThumbnailWithTransform:true,
             kCGImageSourceThumbnailMaxPixelSize:1024
           ] as CFDictionary) else { throw ScanFailure.unsupported }
-    let request = VNGeneratePersonSegmentationRequest()
-    let small = max(thumb.width, thumb.height) <= 256
-    var analysis = thumb
-    if small {
-        let scale = 512.0 / CGFloat(max(thumb.width, thumb.height))
-        let enlarged = CIImage(cgImage:thumb).applyingFilter("CILanczosScaleTransform",
-            parameters:[kCIInputScaleKey:scale,kCIInputAspectRatioKey:1])
-        analysis = context.createCGImage(enlarged,from:enlarged.extent) ?? thumb
+    let buffer: CVPixelBuffer
+    if max(thumb.width, thumb.height) <= 256 {
+        buffer = try SemanticPeople.mask(thumb)
+    } else {
+        let request = VNGeneratePersonSegmentationRequest()
+        request.qualityLevel = .balanced
+        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        try VNImageRequestHandler(cgImage: thumb, options: [:]).perform([request])
+        guard let result = request.results?.first?.pixelBuffer else { throw ScanFailure.unsupported }
+        buffer = result
     }
-    request.qualityLevel = .balanced
-    request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-    try VNImageRequestHandler(cgImage: analysis, options: [:]).perform([request])
-    guard let buffer = request.results?.first?.pixelBuffer else { throw ScanFailure.unsupported }
     CVPixelBufferLockBaseAddress(buffer, .readOnly)
     defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
     guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw ScanFailure.unsupported }
