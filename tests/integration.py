@@ -99,7 +99,8 @@ with tempfile.TemporaryDirectory() as temp:
                 assert delta.getpixel((2,2))==(0,0,0),"Corner changed"
         veto=subprocess.run(curl+["--fail","https://elsewhere.test/"],capture_output=True)
         assert veto.returncode and b"403" in veto.stderr,veto.stderr
-        for edge in (64,128):
+        failures=[]
+        for edge in (64,128,256):
             for name in ("portrait","coffee"):
                 thumb=Image.open(work/(name+".png")).convert("RGB")
                 thumb.thumbnail((edge,edge))
@@ -114,7 +115,8 @@ with tempfile.TemporaryDirectory() as temp:
                 assert repeat==served
                 assert Image.open(BytesIO(served)).size==thumb.size
                 events=json.loads(subprocess.check_output(["curl","--silent","--noproxy","*","-H","Authorization: Bearer ci-test","http://127.0.0.1:17861/events"]))
-                assert (served==path.read_bytes())==(name=="coffee"), (path.name,events[:2])
+                if (served==path.read_bytes())!=(name=="coffee"): failures.append((path.name,events[0]["verdict"]))
+        assert not failures, failures
         diagnostic=["curl","--fail","--silent","--noproxy","*","-H","Authorization: Bearer ci-test"]
         export_url="http://127.0.0.1:17861/export"
         assert subprocess.run(["curl","--fail","--silent","--noproxy","*",export_url],capture_output=True).returncode != 0

@@ -127,8 +127,17 @@ func scan(_ bytes: Data) throws -> Data {
         let faces = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(cgImage:enlarged,options:[:])
         try handler.perform([people,faces])
-        let boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
+        var boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
                     + (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
+        if boxes.isEmpty {
+            let detector = CIDetector(ofType:CIDetectorTypeFace,context:context,
+                                      options:[CIDetectorAccuracy:CIDetectorAccuracyHigh])
+            let image = CIImage(cgImage:enlarged)
+            boxes = (detector?.features(in:image) ?? []).map {
+                CGRect(x:$0.bounds.minX/CGFloat(pw),y:$0.bounds.minY/CGFloat(ph),
+                       width:$0.bounds.width/CGFloat(pw),height:$0.bounds.height/CGFloat(ph))
+            }
+        }
         let union = boxes.reduce(CGRect.null) { $0.union($1) }
         if !union.isNull { fallback = union }
     }
