@@ -22,11 +22,6 @@ func read(_ count: Int) -> Data? {
 }
 
 enum SemanticPeople {
-    static let detector: VNCoreMLModel? = {
-        let resources = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
-        guard let model = try? MLModel(contentsOf:resources.appendingPathComponent("YOLOv3Int8LUT.mlmodelc")) else { return nil }
-        return try? VNCoreMLModel(for:model)
-    }()
     private static let model: VNCoreMLModel? = {
         let resources = URL(fileURLWithPath: CommandLine.arguments[0])
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
@@ -132,17 +127,8 @@ func scan(_ bytes: Data) throws -> Data {
         let faces = VNDetectFaceRectanglesRequest()
         let handler = VNImageRequestHandler(cgImage:enlarged,options:[:])
         try handler.perform([people,faces])
-        var boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
+        let boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
                     + (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
-        if boxes.isEmpty, let model = SemanticPeople.detector {
-            let objects = VNCoreMLRequest(model:model)
-            objects.imageCropAndScaleOption = .scaleFill
-            try handler.perform([objects])
-            boxes = (objects.results as? [VNRecognizedObjectObservation] ?? []).compactMap {
-                guard let label = $0.labels.first, label.identifier == "person", label.confidence >= 0.4 else { return nil }
-                return $0.boundingBox
-            }
-        }
         let union = boxes.reduce(CGRect.null) { $0.union($1) }
         if !union.isNull { fallback = union }
     }
