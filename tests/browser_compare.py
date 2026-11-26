@@ -61,7 +61,7 @@ def verify_running_chrome(directory):
     if "Enabled: No" not in output("networksetup","-getautoproxyurl",service):
         raise RuntimeError("Expected a clean runner without an existing PAC")
     with sync_playwright() as drivers:
-        browser=drivers.chromium.launch(channel="chrome")
+        browser=drivers.chromium.launch(channel="chrome", headless=False)
         try:
             tab=browser.new_page()
             url="http://origin.test:18280/portrait.png"
@@ -69,9 +69,11 @@ def verify_running_chrome(directory):
             assert tab.goto(url+"?direct").body()==raw
             output("sudo","networksetup","-setautoproxyurl",service,"http://127.0.0.1:17861/proxy.pac?revision=live")
             output("sudo","networksetup","-setautoproxystate",service,"on")
+            print("System proxy after activation:",output("scutil","--proxy"),flush=True)
             start=time.monotonic()
             while time.monotonic()-start<20:
-                if tab.goto(url+"?live="+str(time.monotonic_ns())).body()!=raw:
+                response=tab.goto(url+"?live="+str(time.monotonic_ns()))
+                if response.ok and response.body().startswith(b"\x89PNG") and response.body()!=raw:
                     print(f"Already-running Chrome received masked image after {time.monotonic()-start:.2f}s",flush=True)
                     break
                 time.sleep(.2)
