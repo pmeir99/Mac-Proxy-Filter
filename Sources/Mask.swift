@@ -42,7 +42,7 @@ func scan(_ bytes: Data) throws -> Data {
             parameters:[kCIInputScaleKey:scale,kCIInputAspectRatioKey:1])
         analysis = context.createCGImage(enlarged,from:enlarged.extent) ?? thumb
     }
-    request.qualityLevel = small ? .accurate : .balanced
+    request.qualityLevel = .balanced
     request.outputPixelFormat = kCVPixelFormatType_OneComponent8
     try VNImageRequestHandler(cgImage: analysis, options: [:]).perform([request])
     guard let buffer = request.results?.first?.pixelBuffer else { throw ScanFailure.unsupported }
