@@ -2,6 +2,7 @@
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
 from zipfile import ZipFile
+import gzip
 import os, json, ssl, subprocess, sys, tempfile, threading, time
 from pathlib import Path
 from PIL import Image, ImageChops
@@ -33,7 +34,22 @@ with tempfile.TemporaryDirectory() as temp:
     Image.open(work/"portrait.png").convert("RGB").save(slow_image,format="JPEG",progressive=True)
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
-            if self.path == "/slow.jpg":
+            if self.path.startswith("/policy-"):
+                name=self.path.removeprefix("/policy-").split(".")[0]
+                if name=="empty":
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                data=(work/("portrait.png" if name=="person" else "coffee.png")).read_bytes()
+                if name=="gzip": data=gzip.compress(data,mtime=0)
+                self.send_response(200)
+                self.send_header("Content-Type","application/octet-stream" if name=="generic" else "image/png")
+                self.send_header("Cache-Control","public, no-transform")
+                if name=="gzip": self.send_header("Content-Encoding","gzip")
+                self.send_header("Content-Length",str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+            elif self.path == "/slow.jpg":
                 data=slow_image.getvalue()
                 self.send_response(200)
                 self.send_header("Content-Type","image/jpeg")
@@ -159,11 +175,19 @@ with tempfile.TemporaryDirectory() as temp:
         assert recolored!=(work/"out-portrait.png").read_bytes()
         assert Image.open(BytesIO(recolored)).convert("RGB").getpixel((220,100))[0]>245
         settings.write_text("{}")
+        for variant,expected in (("clear",200),("person",403),("empty",204),("generic",200),("gzip",200)):
+            body=subprocess.check_output(curl+["-H","Sec-Fetch-Dest: image","-w","%{http_code}",
+                "https://origin.test:18243/policy-"+variant+".png"])
+            assert int(body[-3:])==expected, (variant,body[-3:])
+            original=(work/"coffee.png").read_bytes()
+            assert body[:-3]==(gzip.compress(original,mtime=0) if variant=="gzip" else original if expected==200 else b""),variant
         diagnostic=["curl","--fail","--silent","--noproxy","*","-H","Authorization: Bearer ci-test"]
         export_url="http://127.0.0.1:17861/export"
         assert subprocess.run(["curl","--fail","--silent","--noproxy","*",export_url],capture_output=True).returncode != 0
         with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?site=origin.test"]))) as report:
             rows=json.loads(report.read("manifest.json"))
+            assert any(r["verdict"]=="Blocked · person in no-transform image" and r["origin"]["noTransform"] and
+                       r["origin"]["status"]==200 and r["origin"]["mime"]=="image/png" and r["status"]==403 for r in rows)
             assert any(r["verdict"]=="Masked" and report.read(r["after"])==(work/"out-portrait.png").read_bytes()
                        and report.read(r["before"])==(work/"portrait.png").read_bytes() for r in rows)
         with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?site=unrelated.test"]))) as report:

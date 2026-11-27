@@ -28,6 +28,9 @@ class Journal:
                    verdict=verdict, mime=flow.response.headers.get("content-type","").split(";")[0],
                    status=flow.response.status_code, elapsedMS=round((time.monotonic()-flow.metadata.get("started",time.monotonic()))*1000),
                    beforeBytes=len(before), afterBytes=len(after or before))
+        if "origin" in flow.metadata:
+            row["origin"] = flow.metadata["origin"]
+            row["mime"] = row["origin"]["mime"]
         if "mask_settings" in flow.metadata: row["maskSettings"] = flow.metadata["mask_settings"]
         if verdict.startswith("Blocked"): row["afterBytes"] = 0
         self.entries.append((row,before,after))

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import time
+import zlib
 import hmac
 from urllib.parse import urlsplit, parse_qs
 import struct
@@ -19,7 +20,7 @@ from journal import Journal
 from policy import domains, pac, tls_pattern, host_pattern
 
 LIMIT = 8 * 1024 * 1024
-TYPES = {"image/jpeg", "image/png", "image/webp", "image/avif"}
+TYPES = {"image/jpeg", "image/png", "image/webp", "image/avif", "image/jpg", "image/pjpeg", "image/x-png", "image/gif", "image/bmp", "image/tiff", "image/heic", "image/heif", "image/x-icon", "image/vnd.microsoft.icon"}
 
 class Filter:
     def __init__(self):
@@ -108,35 +109,37 @@ class Filter:
     def responseheaders(self, flow):
         r = flow.response
         kind = r.headers.get("content-type", "").split(";")[0].strip().lower()
-        transform = (self.allowed(flow.request) and flow.request.method == "GET" and r.status_code == 200
-                     and (kind in TYPES or (kind in ("","application/octet-stream","binary/octet-stream") and flow.request.headers.get("sec-fetch-dest") == "image")) and not r.headers.get("content-range")
-                     and r.headers.get("content-encoding","identity").lower() == "identity"
-                     and "no-transform" not in (r.headers.get("cache-control","")+","+flow.request.headers.get("cache-control","")).lower())
-        length = r.headers.get("content-length", "")
-        if not transform or not length.isdecimal() or not 0 < int(length) <= LIMIT:
-            original_status = r.status_code
+        image_request = flow.request.headers.get("sec-fetch-dest") == "image"
+        if not (self.allowed(flow.request) and flow.request.method == "GET" and
+                (kind.startswith("image/") or image_request)):
             r.stream = True
-            if (self.allowed(flow.request) and flow.request.method=="GET" and
-                (kind.startswith("image/") or flow.request.headers.get("sec-fetch-dest")=="image") and
-                (200 <= r.status_code < 300 or r.status_code==304)):
-                # Suppress every upstream byte, including the first progressive image chunk.
-                r.stream = lambda chunk: b""
-                r.status_code = 403
-                for key in ("content-length","content-encoding","content-range","etag","last-modified"):
-                    r.headers.pop(key,None)
-                r.headers["cache-control"] = "no-store"
-                r.headers["content-type"] = "text/plain"
-                self.counts["blocked"] = self.counts.get("blocked",0)+1
-            if self.capture and (kind.startswith("image/") or flow.request.headers.get("sec-fetch-dest") == "image"):
-                if original_status != 200: reason = f"HTTP {original_status}"
-                elif kind not in TYPES: reason = "media type"
-                elif not length.isdecimal(): reason = "unknown size"
-                elif int(length) > LIMIT: reason = "over size limit"
-                elif r.headers.get("content-encoding","identity").lower() != "identity": reason = "content encoding"
-                else: reason = "response policy"
-                self.journal.add(flow,("Blocked · " if r.status_code==403 and original_status!=403 else "Skipped · ")+reason)
-        else:
-            flow.metadata["scan"] = True
+            return
+        length = r.headers.get("content-length","")
+        encoding = r.headers.get("content-encoding","identity").strip().lower()
+        controls = ",".join([r.headers.get("cache-control",""), flow.request.headers.get("cache-control","")])
+        restricted = "no-transform" in [v.strip().lower() for v in controls.split(",")]
+        flow.metadata["origin"] = dict(status=r.status_code, mime=kind, encoding=encoding,
+            declaredLength=length, noTransform=restricted, partial="content-range" in r.headers)
+        if r.status_code in (204,205) or (r.status_code == 200 and length == "0") or (r.status_code != 304 and not 200<=r.status_code<300):
+            r.stream = True
+            if self.capture: self.journal.add(flow, "Empty" if r.status_code in (204,205) or length=="0" else f"Upstream HTTP {r.status_code}")
+            return
+        reason = None
+        if r.status_code != 200 or "content-range" in r.headers: reason = f"incomplete HTTP {r.status_code}"
+        elif encoding not in ("identity","gzip","x-gzip","deflate"): reason = "encoding " + encoding
+        elif not length.isascii() or not length.isdecimal(): reason = "unknown size"
+        elif int(length)>LIMIT: reason = "over size limit"
+        if reason:
+            r.stream = lambda chunk: b""
+            r.status_code = 403
+            for header in ("content-length","content-encoding","content-range","etag","last-modified"):
+                r.headers.pop(header,None)
+            r.headers["cache-control"] = "no-store"
+            r.headers["content-type"] = "text/plain"
+            self.counts["blocked"] = self.counts.get("blocked",0)+1
+            if self.capture: self.journal.add(flow,"Blocked · "+reason)
+            return
+        flow.metadata["scan"] = True
 
     async def analyze(self, body):
         key = hashlib.sha256(body).digest()
@@ -193,26 +196,42 @@ class Filter:
         if not raw or len(raw)>LIMIT:
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
             return
-        kind = flow.response.headers.get("content-type","").split(";")[0].strip().lower()
-        if kind not in TYPES and not (raw.startswith((b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")) or
-                raw[:4] == b"RIFF" and raw[8:12] == b"WEBP" or raw[4:12] == b"ftypavif"):
-            if self.capture: self.journal.add(flow,"Blocked: unsupported")
-            flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
-            return
+        origin = flow.metadata["origin"]
         try:
+            coding = origin["encoding"]
+            if coding != "identity":
+                decoder = zlib.decompressobj(31 if coding in ("gzip","x-gzip") else 15)
+                raw = decoder.decompress(raw,LIMIT+1)
+                if not decoder.eof or decoder.unused_data or len(raw)>LIMIT:
+                    raise ValueError("Invalid or oversized compressed image")
+            # Admit only recognizable raster payloads, independently of CDN MIME labels.
+            raster = (raw.startswith((b"\xff\xd8\xff",b"\x89PNG\r\n\x1a\n",b"GIF87a",b"GIF89a",b"BM",
+                       b"II*\x00",b"MM\x00*",b"\x00\x00\x01\x00")) or
+                      raw[:4]==b"RIFF" and raw[8:12]==b"WEBP" or raw[4:8]==b"ftyp" and
+                      any(brand in raw[8:64] for brand in (b"avif",b"heic",b"mif1")))
+            if not raster:
+                if self.capture: self.journal.add(flow,"Blocked · unsupported payload")
+                flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
+                return
             masked = await self.analyze(raw)
             flow.metadata["mask_settings"] = dict(self.style or ())
-        except (OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
+        except (zlib.error, OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
             if self.capture: self.journal.add(flow,"Blocked: scan error",raw)
             self.counts["errors"] += 1
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
+            return
+        if masked and origin["noTransform"]:
+            flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
+            self.counts["blocked"] = self.counts.get("blocked",0)+1
+            self.counts["scanned"] += 1
+            if self.capture: self.journal.add(flow,"Blocked · person in no-transform image",raw)
             return
         if self.capture: self.journal.add(flow,"Masked" if masked else "Clear",raw,masked)
         self.counts["scanned"] += 1
         if masked:
             self.counts["masked"] += 1
             r = flow.response
-            for header in ("etag","last-modified","accept-ranges","digest","content-digest","repr-digest","content-md5"):
+            for header in ("content-encoding","etag","last-modified","accept-ranges","digest","content-digest","repr-digest","content-md5"):
                 r.headers.pop(header, None)
             r.headers["content-type"] = "image/png"
             r.headers["cache-control"] = "private, no-store"

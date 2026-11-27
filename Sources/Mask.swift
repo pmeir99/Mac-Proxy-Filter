@@ -85,8 +85,9 @@ func scan(_ bytes: Data) throws -> Data {
           let info = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any],
           let w = info[kCGImagePropertyPixelWidth as String] as? Int,
           let h = info[kCGImagePropertyPixelHeight as String] as? Int,
-          w > 0, h > 0, w <= 12_000_000 / h,
-          let photo = CIImage(data: bytes, options: [.applyOrientationProperty:true]),
+          w > 0, h > 0, w <= 12_000_000 / h else { throw ScanFailure.unsupported }
+    if w == 1 && h == 1 { return Data() }
+    guard let photo = CIImage(data: bytes, options: [.applyOrientationProperty:true]),
           let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, [
             kCGImageSourceCreateThumbnailFromImageAlways:true,
             kCGImageSourceCreateThumbnailWithTransform:true,
