@@ -1,60 +1,53 @@
 # Mac Proxy Filter
 
-Mac Proxy Filter is a development build for people-only blurring on a configurable set of image hosts. The SwiftUI app saves the domain list on your Mac. Ordinary Chrome can use it through the macOS automatic proxy configuration setting. Apple Vision performs segmentation locally. Core Image applies Gaussian blur through the resulting mask. There is no account, analytics service, remote model, or extension.
+Mac Proxy Filter is a local macOS proxy that masks people in website images. Use ordinary Chrome, choose which image hosts to filter, and set how much of each person to cover. The app inspects eligible images before it sends them to the browser. When it detects no person, it returns the original image. Recognition and masking run on your Mac.
 
-## Choose the scope
+**Current status:** Development preview for Apple silicon, with a macOS 14 minimum deployment target. The ZIP includes the proxy engine, its Python runtime, and the thumbnail model. Setup requires macOS approval for HTTPS trust and network routing. No extension, account, Terminal installation, or model download is required. [Download a Mac Proxy Filter preview](https://github.com/pmeir99/Mac-Proxy-Filter/releases)
 
-Start with an empty list. Enter one exact destination hostname per line. To change the list, press Stop, edit, then Start. The list persists across launches. Chrome may cache a PAC file. After changing the list, reapply the proxy setting and fully quit and reopen Chrome for your test.
+## Set up and verify filtering
 
-For example, if a product page at `shop.example` loads a thumbnail from `images.example`, add `images.example` to cover that thumbnail. Adding only `shop.example` covers images served by the shop host itself. A selected shared CDN is filtered everywhere it is used. Subdomains require their own entries. Chrome DevTools → Network → Img → Request URL shows the actual destination. An embedded data URL has no separate network request.
+1. Download **Mac-Proxy-Filter.zip**, unzip it in Finder, move **Mac Proxy Filter** to Applications, and open it.
+2. In **Overview → Websites**, select **Filter all public websites**, or enter one exact destination hostname per line under **Included hosts**. Use hostnames without a scheme, path, or wildcard. If an Amazon image URL begins with `https://m.media-amazon.com/`, enter `m.media-amazon.com`. Adding `amazon.com` alone will miss that request. A shared image host is filtered on every page that uses it. **Connect directly to these hosts** gives exact hosts an exception.
+3. Click **Enable filtering…** and approve the setup dialogs. The app creates a local certificate authority, verifies HTTPS trust, and configures the system proxy on eligible network services. Wi-Fi networks using the same service share its settings. Setup reports services it skips because another proxy is active. Run **Check or repair setup…** after adding a network service or if routing or trust fails.
+4. Look for **Enabled on current network**. Reload an in-scope page in Chrome and check the request and image counters. To test a fresh transfer, open DevTools → Network, select **Disable cache**, keep DevTools open, and reload. Compare a portrait and a product-only image from the same image host. A setup check can increment the request count on its own.
 
-Choose **Filter all public websites** to cover public HTTP(S) hostname destinations in PAC-aware clients, including separate image hosts. Use the direct-connection list for exact host exceptions such as a pinned service. Local names and literal IPs go direct in all-sites mode. Availability-first behavior allows direct traffic if the proxy is unreachable and blocks identified images that cannot be inspected. Inline images and unsupported network responses still have the coverage limits below.
+## What happens to an image
 
-## Run on your Mac
-
-1. Download **Mac-Proxy-Filter.zip** from the latest Mac Proxy Filter preview, double-click the ZIP in Finder, drag **Mac Proxy Filter** to Applications, and open it. This Apple silicon app includes its proxy engine and Python runtime and uses the Vision framework supplied by macOS. All user setup is graphical. [Releases](https://github.com/pmeir99/Mac-Proxy-Filter/releases)
-2. Choose your scope and click **Enable filtering…**. Approve the macOS dialogs. The app checks a selected HTTPS destination (example.com or example.org in all-sites mode), verifies trust, and applies routing. Existing competing proxy settings are skipped.
-3. Look for **Enabled on current network** and increasing request and image counters. The TLS check itself can count as a request. **Check or repair setup…** retries the setup. Activity shows aggregate counts. Optional diagnostic capture retains up to five minutes of image decisions and before/after bytes in RAM (64 MiB, 1,500 entries). A referring host is available only when supplied by the browser. Export writes a ZIP to a location you choose. Capture settings apply on startup. Mask changes apply to new requests while filtering is running. Updates are checked on demand against this GitHub repository.
-4. Wi-Fi networks that use the same Wi-Fi service share its settings. If you add a new network service later, run setup again. Services with an existing active proxy are reported and skipped. Use **Restore previous network routing…** before stopping or uninstalling. Remove certificate trust separately in Keychain Access.
-5. For a clean test, disable the old image-filter extension, open DevTools with **Disable cache** enabled, and reload the page. Compare a person and a product-only image on the selected host, then load an image on an unrelated host. Check the element dimensions and any CSS crop or border radius in both views. A fresh browser profile helps distinguish service-worker responses from new network transfers.
-
-To switch back, restore the previous network proxy settings first, then stop the app. To uninstall, also remove this installation's certificate from Keychain Access and delete the app. Its locally generated key material is under `~/Library/Application Support/Mac Proxy Filter/`.
-
-## How a request travels
-
-| Stage | Behavior |
+| Stage | Current behavior |
 | --- | --- |
-| Destination selection | The app serves a PAC on loopback. Supported destinations use the local proxy. Other hosts go directly to the network in PAC-aware clients. The explicit proxy also checks the destination itself. |
-| HTTPS | mitmproxy terminates the selected connection locally and verifies the origin's certificate. A client that pins certificates or ignores system proxy settings may fail or bypass this route. |
-| Image selection | Full 200 GET responses with a supported image MIME type, identity encoding and a declared body length of up to 8 MiB are eligible. The filter respects no-transform. Other responses stream through. |
-| Recognition | A resident Swift process decodes a still image up to 12 megapixels and runs Vision on an orientation-corrected thumbnail of up to 1024 pixels on its longest side. Repeated bytes reuse an in-memory decision. No standalone model download is required. |
-| Rendering | An empty detection returns the original response bytes. A positive result returns a full-resolution PNG with the detected people blurred. The page keeps its own element, positioning and CSS clipping. A scan failure withholds the image and increments the error count. |
+| Route | A proxy auto-configuration (PAC) file sends selected destinations to the local proxy in browsers that honor macOS proxy settings. In all-sites mode, local names and literal IP addresses go direct. |
+| Inspect | The proxy verifies the upstream HTTPS certificate and holds eligible still-image responses for scanning. The current limits are 8 MiB for the image body and 12 megapixels for decoding. |
+| Detect | A resident Swift worker uses Apple Vision person segmentation for larger images. At 256 pixels or less on the longest side it uses the bundled DeepLabV3 FP16 Core ML model, with localized person or face detection as a fallback when the mask is empty. Repeated image content can reuse a cached result. |
+| Render | A clear result preserves the image bytes. A positive result normally returns a full-size PNG with a Core Image blur or solid cover. Chrome still owns the element, crop, border radius and overlays. For an image marked `no-transform`, a clear result passes through and an image requiring a mask is withheld. |
+| Handle failures | Recognized image requests with an unreadable or unsupported body, missing length, partial content, or a scan failure can be withheld. A missing thumbnail can therefore be a filtering decision even when the page loads. |
 
-## Coverage and verification
+## App controls
 
-This first build covers fresh, eligible network transfers. Existing caches, inline images, canvas drawing, offline service workers, and video frames can display unmodified content. Identifiable network images that cannot be inspected are blocked. Eligible multi-frame files currently fail the still-image scan. Recognition can miss people or blur a false positive. Device throughput, tiny thumbnails, crowd scenes, and live retailer coverage require separate measurements. The worker serializes inference and retains up to 256 cached results with a 32 MiB output budget.
+- **Overview** controls website scope, HTTPS setup, login startup, and menu-bar behavior. Closing the window keeps the worker running. Enable **Keep filtering in the menu bar when I press ⌘Q** if you want the Quit shortcut to do the same. Stop filtering before editing the host lists.
+- **Mask** offers Gaussian blur with adjustable strength or a solid cover with a chosen color. **Follow people** uses the detected shape. **Enclosing rectangle** covers the region containing all detections. Add up to 20% of the shorter image dimension as extra margin. Changes apply to new image requests while filtering runs.
+- **Activity** shows counters. For an individual decision, enable **Capture image diagnostics** before starting, reproduce the issue, and filter by exact image or referring hostname. **Export last 5 minutes…** saves a local ZIP with decisions, timings, response details, and available original and displayed images. Capture is off by default and bounded to five minutes, 64 MiB and 1,500 entries. Review the ZIP before sharing because it can contain unmasked photos.
+- **Updates** checks this repository on demand and offers **Download and install** when a newer proxy build is available.
 
-Run `python3 tests/policy_test.py` with Node installed to test PAC routing and TLS scope. The macOS workflow compiles and signature-checks the app. Its integration test runs the real engine against a local TLS origin, sends portrait and object-only fixtures through the Vision worker, compares bytes and output pixels, and checks refusal of an unlisted CONNECT. A second, HTTP browser fixture compares screenshots from direct and PAC-routed Chrome loads. It checks image bounds, a circular clip, an overlaid shape, and an identical portrait on an unlisted host. Test-only certificate trust is confined to the test processes. The workflow downloads the public scikit-image astronaut and coffee fixtures during CI. Runtime inference is local.
+To uninstall, use **Overview → Network setup → Restore previous routing…** before quitting. Remove the installation’s certificate from Keychain Access and delete the app. **Show public certificate** helps identify the certificate created by this installation.
 
-## Building from source
+## Coverage and troubleshooting
 
-On an Apple silicon Mac with Xcode Command Line Tools, run `bash build.sh`. During packaging the script downloads the official arm64 mitmproxy bundle, checks its pinned SHA-256 digest, verifies its signature, and embeds it inside the app. The release workflow extracts the finished ZIP into a separate folder, checks its signature, and tests the included engine with only system directories on its executable search path. The outer app is ad-hoc signed for development.
-
-## Design references
-
-- Chromium documents which URL and host information is available to a PAC script. This is why the control uses destination hostnames. [Chromium proxy design](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md)
-- Apple provides an automatic proxy URL for each network service. DNS alone cannot supply the decoded pixels required for masking. [macOS proxy settings](https://support.apple.com/guide/mac-help/mchlp2591/mac)
-- The proxy engine documents certificate generation, client trust, upstream verification and host selection. [Certificates](https://docs.mitmproxy.org/stable/concepts/certificates/) · [Options](https://docs.mitmproxy.org/stable/concepts/options/) · [Installation](https://docs.mitmproxy.org/stable/overview/installation/)
-- Apple's person-segmentation request produces a foreground mask suited to compositing. [Vision segmentation](https://developer.apple.com/documentation/vision/vngeneratepersonsegmentationrequest)
-- HTTP defines no-transform for intermediaries and separate semantics for range responses. [RFC 9110](https://www.rfc-editor.org/rfc/rfc9110.html) · [RFC 9111](https://www.rfc-editor.org/rfc/rfc9111.html)
-
-### Interception options considered
-
-| Method | Fit for this project |
+| Symptom | What to check |
 | --- | --- |
-| DNS proxy | DNS sees hostname lookups. It can support blocking an entire destination. Pixel masking needs access to each image response. [Apple DNS proxy](https://developer.apple.com/documentation/networkextension/nednsproxyprovider) |
-| macOS content-filter extension | Apple's data provider has read-only access to flows and issues filtering verdicts. Replacing a JPEG with a composited image requires another mechanism. [Apple Network Extensions session](https://developer.apple.com/videos/play/wwdc2019/714/) |
-| Chrome page extension | A page script has the embedding context and can cover inline or generated media, but has to track DOM changes and clipping. Chrome's declarative request rules also have documented limits for service-worker-generated responses. [Chrome request rules](https://developer.chrome.com/docs/extensions/reference/api/declarativeNetRequest/) |
-| Local HTTP proxy with a PAC | Used in this build. A fresh image response can be replaced once before Chrome decodes it, regardless of whether the website used an img element or a CSS background. The browser owns the final geometry. The PAC sees the resource destination. Browser-local media and an embedding-page-only scope on a shared CDN would require browser cooperation. [Chromium PAC behavior](https://chromium.googlesource.com/chromium/src/+/HEAD/net/docs/proxy.md) |
+| An image appears unchanged | Find its actual **Request URL** in Chrome DevTools. Check scope, direct exceptions, and whether Activity recorded a scan. A recorded clear decision on a visible person indicates a detection miss. Browser cache, offline service workers, inline data, blobs assembled locally, canvas and video frames can display pixels without an eligible new image transfer. |
+| A page fails or shows a certificate warning | Record the exact hostname and browser error, then use **Check or repair setup…**. Clients that pin certificates can reject a locally trusted proxy. Record whether the same page loads after restoring previous routing. |
+| A thumbnail is missing | With capture enabled, check the image decision and upstream HTTP status. A retailer error, a partial response, an unsupported image, and a person in a `no-transform` image call for different fixes. A referring hostname is available only when supplied by the client. |
 
-Activation publishes a revisioned PAC URL. Already-displayed pixels, browser-local media and transfers started before routing changes may require a page reload. In-scope HTTP image responses with unsupported formats, ranges, missing length or scan errors are withheld. Non-image response streams and redirects retain their normal behavior. Closing the main window keeps the process alive.
+Coverage depends on the client following system routing. The PAC permits a direct connection if the local proxy is unavailable. Starting filtering cannot recall pixels already displayed or transfers already underway. Small or crowded subjects can be missed, and objects can be misidentified.
+
+## Verification and goals
+
+The macOS workflow tests the extracted app against a local HTTPS origin, compares portrait and object-only fixtures, and checks direct versus filtered Chrome rendering, including a circular crop and an overlay. Retail probes exercise individual Best Buy and Home Depot image responses. Those checks cover specific fixtures and URLs. Full storefront navigation and detection accuracy across a retailer’s catalog remain open. [Passing verification run](https://github.com/pmeir99/Mac-Proxy-Filter/actions/runs/45915209038) · [Test suite](tests)
+
+The immediate goal is reliable people-only masking on an M4 Mac with 16 GB of memory. Priorities are fewer missed thumbnails and false positives, fewer unnecessarily withheld images, and measured latency on image-heavy pages. Clothing or modesty levels, skin-only masks, selective masking by sex, and product-category detection are outside the current preview.
+
+## Build from source
+
+On an Apple silicon Mac with the Xcode tools, run `bash build.sh`. The build downloads and verifies the pinned proxy bundle and Core ML model, then produces an ad-hoc-signed app in `dist/`. To run the routing and policy tests separately, use `python3 tests/policy_test.py` with Node.js installed. [Build script](build.sh) · [Verification workflow](.github/workflows/verify.yml)
+
+For editing a photo you open yourself, see the [standalone image editor](https://github.com/pmeir99/Image-Filtration-V1). The [ImageEditor directory](ImageEditor) documents the separate editor snapshot included in this tree.
