@@ -1,0 +1,289 @@
+name: Verify Mac Proxy Filter
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_number:
+        required: false
+        type: string
+      race_id:
+        description: Parent build race identifier
+        required: false
+        type: string
+      runner_label:
+        description: Compatible macOS runner to try
+        required: false
+        type: choice
+        options:
+          - macos-26
+          - macos-15
+          - macos-latest
+
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: ${{ startsWith(github.ref_name, 'mac-proxy-filter-races/') && format('mac-proxy-filter-candidate-{0}', github.run_id) || format('mac-proxy-filter-{0}', github.ref) }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch-race:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    outputs:
+      race_id: ${{ steps.race.outputs.race_id }}
+      branch: ${{ steps.race.outputs.branch }}
+      winner_run: ${{ steps.winner.outputs.run_id }}
+    steps:
+      - name: Dispatch compatible macOS runners
+        id: race
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const raceId = String(context.runId) + "-" + process.env.GITHUB_RUN_ATTEMPT;
+            const branch = "mac-proxy-filter-races/" + raceId;
+            const labels = ["macos-26", "macos-15", "macos-latest"];
+
+            const oldRuns = await github.rest.actions.listWorkflowRuns({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: "verify.yml",
+              event: "workflow_dispatch",
+              per_page: 100
+            });
+            for (const run of oldRuns.data.workflow_runs) {
+              if (!run.head_branch.startsWith("mac-proxy-filter-races/")) continue;
+              if (["completed", "cancelled", "failure"].includes(run.status)) continue;
+              try {
+                await github.rest.actions.cancelWorkflowRun({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  run_id: run.id,
+                  request: {parseSuccessResponseBody: false}
+                });
+              } catch (error) {
+                if (![404,409].includes(error.status) && !(error.status >= 500)) throw error;
+                if (error.status >= 500) core.warning("GitHub did not confirm canceling an older run: " + run.id);
+              }
+            }
+
+            await github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: "refs/heads/" + branch,
+              sha: context.sha
+            });
+            core.setOutput("race_id", raceId);
+            core.setOutput("branch", branch);
+
+            const submissions = await Promise.allSettled(labels.map(runner_label =>
+              github.rest.actions.createWorkflowDispatch({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: "verify.yml",
+                ref: branch,
+                request: {parseSuccessResponseBody: false},
+                inputs: { race_id: raceId, runner_label, release_number: process.env.GITHUB_RUN_NUMBER }
+              })
+            ));
+            if (submissions.every(result => result.status === "rejected" && result.reason.status < 500))
+              throw submissions[0].reason;
+            submissions.forEach((result,index) => {
+              if (result.status === "rejected")
+                core.warning("GitHub did not confirm the " + labels[index] + " dispatch. Checking for the run.");
+            });
+            core.info("Requested " + labels.length + " compatible macOS runner candidates.");
+
+      - name: Wait for the runner that wins and builds
+        id: winner
+        uses: actions/github-script@v8
+        env:
+          SOURCE_BRANCH: ${{ steps.race.outputs.branch }}
+        with:
+          retries: 3
+          script: |
+            const branch = process.env.SOURCE_BRANCH;
+            for (let attempt = 0; attempt < 300; attempt++) {
+              const { data } = await github.rest.actions.listWorkflowRuns({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                workflow_id: "verify.yml",
+                branch,
+                event: "workflow_dispatch",
+                per_page: 100
+              });
+              if (attempt >= 12 && !data.workflow_runs.length)
+                throw new Error("GitHub did not start any macOS runner candidates.");
+              for (const winner of data.workflow_runs.filter(run => run.conclusion === "success")) {
+                const {data: artifacts} = await github.rest.actions.listWorkflowRunArtifacts({...context.repo, run_id: winner.id});
+                if (!artifacts.artifacts.some(artifact => artifact.name === "Mac-Proxy-Filter")) continue;
+                core.setOutput("run_id", String(winner.id));
+                core.info("Winning runner build: workflow run " + winner.id + ".");
+                return;
+              }
+              // A cancelled sibling may disappear from the API. Detect failure of
+              // the actual builder without waiting for three terminal rows.
+              for (const run of data.workflow_runs.filter(r => ["failure","timed_out"].includes(r.conclusion))) {
+                const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:run.id});
+                if (jobs.jobs.some(job => job.steps?.some(step =>
+                    step.name === "Check out source" && step.conclusion && step.conclusion !== "skipped")))
+                  throw new Error("The winning macOS runner failed: "+run.html_url);
+              }
+              const terminal = ["completed", "cancelled", "failure", "timed_out", "action_required"];
+              if (data.workflow_runs.length >= 3 &&
+                  data.workflow_runs.every(run => terminal.includes(run.status))) {
+                throw new Error("Every macOS runner candidate ended without a successful build.");
+              }
+              await new Promise(resolve => setTimeout(resolve, 10000));
+            }
+            throw new Error("No compatible runner completed the build within 50 minutes.");
+
+      - name: Remove temporary race refs
+        if: always() && steps.race.outputs.race_id != ''
+        uses: actions/github-script@v8
+        env:
+          RACE_ID: ${{ steps.race.outputs.race_id }}
+        with:
+          script: |
+            for (const ref of [
+              "heads/mac-proxy-filter-races/" + process.env.RACE_ID,
+              "tags/mac-proxy-filter-claim-" + process.env.RACE_ID
+            ]) {
+              try {
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref,
+                  request: {parseSuccessResponseBody: false}
+                });
+              } catch (error) {
+                if (![404,422].includes(error.status) && !(error.status >= 500)) throw error;
+                if (error.status >= 500) core.warning("GitHub did not confirm removal of " + ref);
+              }
+            }
+
+  claim-test-package:
+    if: startsWith(github.ref_name, 'mac-proxy-filter-races/') && inputs.race_id != ''
+    runs-on: ${{ inputs.runner_label }}
+    timeout-minutes: 40
+    steps:
+      - name: Atomically claim the race and cancel losing runners
+        id: claim
+        uses: actions/github-script@v8
+        env:
+          RACE_ID: ${{ inputs.race_id }}
+        with:
+          script: |
+            const raceId = process.env.RACE_ID;
+            const ref = "refs/tags/mac-proxy-filter-claim-" + raceId;
+            try {
+              await github.rest.git.createRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref,
+                sha: context.sha
+              });
+              core.setOutput("winner", "true");
+            } catch (error) {
+              if (error.status !== 422 && error.status !== 409) throw error;
+              core.setOutput("winner", "false");
+              core.info("Another compatible runner claimed the build first.");
+              return;
+            }
+
+            const branch = context.ref.replace(/^refs\/heads\//, "");
+            const cancelled = new Set();
+            for (let attempt = 0; attempt < 12 && cancelled.size < 2; attempt++) {
+              const {data} = await github.rest.actions.listWorkflowRuns({
+                ...context.repo, workflow_id: "verify.yml", branch, per_page: 10
+              });
+              await Promise.all(data.workflow_runs.filter(run => run.id !== context.runId && !cancelled.has(run.id)).map(async run => {
+                if (run.status !== "completed") {
+                  try { await github.rest.actions.cancelWorkflowRun({...context.repo, run_id: run.id, request: {parseSuccessResponseBody: false}}); }
+                  catch (error) {
+                    if (error.status >= 500) return; // Poll the run again; GitHub may have applied the cancellation.
+                    if (![404,409].includes(error.status)) throw error;
+                  }
+                }
+                cancelled.add(run.id);
+              }));
+              if (cancelled.size < 2) await new Promise(resolve => setTimeout(resolve, 500));
+            }
+
+      - name: Check out source
+        uses: actions/checkout@v5
+        if: steps.claim.outputs.winner == 'true'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        if: steps.claim.outputs.winner == 'true'
+        with:
+          python-version: '3.13'
+      - run: python -m pip install Pillow playwright
+        if: steps.claim.outputs.winner == 'true'
+      - run: python tests/policy_test.py && python tests/admission_test.py && bash build.sh
+        env:
+          RELEASE_NUMBER: ${{ inputs.release_number }}
+        if: steps.claim.outputs.winner == 'true'
+      - name: Package and relocate the release for testing
+        if: steps.claim.outputs.winner == 'true'
+        run: |
+          set -euo pipefail
+          if command -v mitmdump; then
+            echo "Standalone verification requires a runner without mitmdump installed."
+            exit 1
+          fi
+          ditto -c -k --keepParent "dist/Mac Proxy Filter.app" dist/Mac-Proxy-Filter.zip
+          ditto -x -k dist/Mac-Proxy-Filter.zip "$RUNNER_TEMP/Finder extraction"
+          codesign --verify --deep --strict "$RUNNER_TEMP/Finder extraction/Mac Proxy Filter.app"
+      - name: Test HTTPS through the real proxy and Vision worker
+        env:
+          FILTER_TEST_APP: ${{ runner.temp }}/Finder extraction/Mac Proxy Filter.app
+          FILTER_TEST_EVIDENCE: ${{ runner.temp }}/filter-comparison
+        if: steps.claim.outputs.winner == 'true'
+        run: |
+          set -euo pipefail
+          echo '127.0.0.1 origin.test outside.test' | sudo tee -a /etc/hosts
+          url=https://raw.githubusercontent.com/scikit-image/scikit-image/e8a42ba85aaf5fd9322ef9ca51bc21063b22fcae/skimage/data
+          curl -fsSL --retry 3 "$url/astronaut.png" -o "$RUNNER_TEMP/portrait.png"
+          curl -fsSL --retry 3 "$url/coffee.png" -o "$RUNNER_TEMP/coffee.png"
+          python tests/integration.py "$RUNNER_TEMP/portrait.png" "$RUNNER_TEMP/coffee.png"
+          FILTER_ALL=1 python tests/integration.py "$RUNNER_TEMP/portrait.png" "$RUNNER_TEMP/coffee.png"
+          python tests/retail_probe.py
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.claim.outputs.winner == 'true'
+        with:
+          name: Chrome-comparison
+          path: ${{ runner.temp }}/filter-comparison/
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: steps.claim.outputs.winner == 'true'
+        with:
+          name: Mac-Proxy-Filter
+          path: dist/Mac-Proxy-Filter.zip
+  preview:
+    needs: dispatch-race
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Mac-Proxy-Filter
+          run-id: ${{ needs.dispatch-race.outputs.winner_run }}
+          github-token: ${{ github.token }}
+      - name: Publish tested development build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v0.1.8-preview.$GITHUB_RUN_NUMBER" Mac-Proxy-Filter.zip \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease \
+            --title "Mac Proxy Filter 0.1.8 preview $GITHUB_RUN_NUMBER" \
+            --notes "Self-contained Apple silicon build. Unzip, drag Mac Proxy Filter to Applications, then open it. The proxy engine and its runtime are included. See the README for the one-time HTTPS trust and network settings."
