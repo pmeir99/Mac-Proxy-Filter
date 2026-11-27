@@ -34,11 +34,28 @@ def compare(directory, prefix_sent, finish_image):
                 browser.close()
 
         bounds, before = capture(["--no-proxy-server"])
+        import base64
+        embedded = base64.b64encode((directory / "portrait.png").read_bytes()).decode()
+        (directory / "inline.html").write_text(
+            f'<img id="embedded" src="data:image/png;base64,{embedded}">'
+            '<img id="network" src="/portrait.png">')
         prefix_sent.clear()
         finish_image.clear()
         browser = drivers.chromium.launch(channel="chrome", args=["--proxy-pac-url=http://127.0.0.1:17861/proxy.pac"])
         try:
             tab = browser.new_page()
+            response = tab.goto("http://origin.test:18280/inline.html")
+            assert "img-src http: https:" in response.headers.get("content-security-policy","")
+            assert tab.locator("#embedded").evaluate("img => img.complete && img.naturalWidth === 0")
+            tab.locator("#network").evaluate("img => img.decode()")
+            rejected = tab.evaluate("""async () => {
+                const content = await (await fetch('/portrait.png')).blob();
+                const url = URL.createObjectURL(content);
+                const img = new Image(); img.src = url;
+                try { await img.decode(); return false; } catch { return true; }
+                finally { URL.revokeObjectURL(url); }
+            }""")
+            assert rejected, "Blob image decoded in a protected document"
             tab.goto("http://outside.test:18280/page.html")
             tab.evaluate("""() => { document.body.replaceChildren(); const image = new Image();
                 document.body.append(image); image.src = 'http://origin.test:18280/slow.jpg'; }""")

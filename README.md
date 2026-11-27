@@ -55,3 +55,5 @@ For editing a photo you open yourself, see the [standalone image editor](https:/
 [Current architecture and diagnostic fields](docs/architecture.md) · [Engineering decisions and remaining validation](docs/engineering-review.md)
 
 The proxy buffers recognized image responses before deciding what to deliver. Unrecognized generic binary data, oversized or lengthless candidate bodies, and non-success image bodies can be withheld. Gaussian blur uses a binary coverage mask and one radius within a given image. The blurred colors still follow the source lighting. Solid cover provides a single color.
+
+Fresh routed HTML documents receive an additional Content Security Policy allowing HTTP(S) image sources only. Data and blob previews, including legitimate icons, may appear blank. Route the document host as well as its image hosts. Embedded bytes may still be present in the document. Canvas, inline SVG geometry, video, previously cached documents and unfiltered frames are outside this image-source rule.

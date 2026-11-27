@@ -111,7 +111,13 @@ class Filter:
     def responseheaders(self, flow):
         r = flow.response
         kind = r.headers.get("content-type", "").split(";")[0].strip().lower()
-        image_request = flow.request.headers.get("sec-fetch-dest") == "image"
+        destination = flow.request.headers.get("sec-fetch-dest", "")
+        image_request = destination == "image"
+        if self.allowed(flow.request) and (kind in ("text/html", "application/xhtml+xml") or
+                destination in ("document", "iframe", "frame")):
+            # Separate policies intersect; retain the site's original security restrictions.
+            r.headers.add("content-security-policy", "img-src http: https:")
+            r.headers["cache-control"] = "private, no-store"
         if "started" in flow.metadata:
             flow.metadata["headersAt"] = time.monotonic()
         path = flow.request.path.split("?", 1)[0].lower()
