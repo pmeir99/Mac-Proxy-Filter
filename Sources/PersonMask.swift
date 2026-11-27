@@ -4,6 +4,8 @@ import CoreVideo
 import Foundation
 import Vision
 
+enum ScanFailure: Error { case unsupported }
+
 /// Vision reports normalized rectangles from the lower left. Pixel-buffer rows
 /// run from the top. Keep that conversion in one place for matching and rendering.
 struct PersonAnchor {
@@ -40,6 +42,18 @@ private struct Window {
     }
     func contains(_ x: Int, _ y: Int) -> Bool {
         x >= x0 && y >= y0 && x < x1 && y < y1
+    }
+}
+
+private struct PixelBounds {
+    var left = Int.max, right = -1, top = Int.max, bottom = -1
+    mutating func include(x: Int, y: Int) {
+        left = min(left,x); right = max(right,x); top = min(top,y); bottom = max(bottom,y)
+    }
+    func normalized(width: Int, height: Int) -> CGRect? {
+        guard right >= left else { return nil }
+        return CGRect(x:CGFloat(left)/CGFloat(width),y:CGFloat(height-1-bottom)/CGFloat(height),
+                      width:CGFloat(right-left+1)/CGFloat(width),height:CGFloat(bottom-top+1)/CGFloat(height))
     }
 }
 
@@ -125,23 +139,39 @@ func selectPeople(_ buffer: CVPixelBuffer, anchors: [PersonAnchor]) throws -> Se
         }
         // A face without a matching body box can still validate its attached
         // silhouette (close portraits, seated people, partial bodies).
-        let faceOnly = matched.contains { i in
+        let standaloneFaces = matched.filter { i in
             anchors[i].isFace && !bodies.contains { $0.contains(CGPoint(x:boxes[i].midX,y:boxes[i].midY)) }
-        }
-        var x0 = w, x1 = -1, y0 = h, y1 = -1
+        }.map { CGPoint(x:boxes[$0].midX,y:boxes[$0].midY) }
+        var extents = Array(repeating:PixelBounds(),count:bodies.count+standaloneFaces.count)
         output.withUnsafeMutableBytes { (data: UnsafeMutableRawBufferPointer) in
             let bytes = data.bindMemory(to: UInt8.self)
             for pixel in component {
                 let y = pixel / w, x = pixel-y*w
-                guard faceOnly || bodyWindows.contains(where:{ $0.contains(x,y) }) else { continue }
+                var insideBody = false
+                for (i,window) in bodyWindows.enumerated() where window.contains(x,y) {
+                    extents[i].include(x:x,y:y)
+                    insideBody = true
+                }
+                if !insideBody {
+                    guard !standaloneFaces.isEmpty else { continue }
+                    var nearest = 0
+                    var best = CGFloat.infinity
+                    for (i,point) in standaloneFaces.enumerated() {
+                        let dx = point.x-CGFloat(x), dy = point.y-CGFloat(y)
+                        let distance = dx*dx + dy*dy
+                        if distance < best { nearest = i; best = distance }
+                    }
+                    extents[bodies.count+nearest].include(x:x,y:y)
+                }
                 bytes[pixel] = 255
-                x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y)
             }
         }
-        if x1 >= 0 {
+        // Keep corroborating locations separate even if the proposed matte had
+        // a thin bridge between them that was subsequently clipped away.
+        let regions = extents.compactMap { $0.normalized(width:w,height:h) }
+        if !regions.isEmpty {
             selected.confirmed.formUnion(matched)
-            selected.regions.append(CGRect(x:CGFloat(x0)/CGFloat(w),y:CGFloat(h-1-y1)/CGFloat(h),
-                width:CGFloat(x1-x0+1)/CGFloat(w),height:CGFloat(y1-y0+1)/CGFloat(h)))
+            selected.regions.append(contentsOf:regions)
         }
     }
     if !selected.regions.isEmpty {

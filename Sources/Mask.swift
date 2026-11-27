@@ -5,7 +5,6 @@ import ImageIO
 import Vision
 import UniformTypeIdentifiers
 
-enum ScanFailure: Error { case unsupported }
 let context = CIContext()
 let rgb = CGColorSpace(name: CGColorSpace.sRGB)!
 let input = FileHandle.standardInput
@@ -162,24 +161,33 @@ func nativePeople(_ opaque: CGImage, paddedRetry: Bool) throws -> [PersonAnchor]
     return anchors
 }
 
-// Recheck overlapping neighborhoods for small faces hidden by larger people.
-// Duplicates from neighboring tiles do not consume the localized retry budget.
-func neighborhoodFaces(_ image: CGImage, known: [PersonAnchor]) throws -> [PersonAnchor] {
+func sameLocation(_ a: PersonAnchor, _ b: PersonAnchor) -> Bool {
+    guard a.isFace == b.isFace else { return false }
+    let overlap = a.box.intersection(b.box)
+    let intersection = overlap.width*overlap.height
+    return intersection > 0.6 * min(a.box.width*a.box.height,b.box.width*b.box.height)
+}
+
+// A thumbnail may contain several people at very different scales. Only a
+// scene already containing several distinct detections gets the four tile passes.
+func neighborhoodPeople(_ image: CGImage, known: [PersonAnchor]) throws -> [PersonAnchor] {
     var found = [PersonAnchor]()
-    for y in [0.0, 0.4] {
-        for x in [0.0, 0.4] {
-            let frame = CGRect(x:x,y:y,width:0.6,height:0.6)
+    for y in [0.0, 0.36] {
+        for x in [0.0, 0.36] {
+            let frame = CGRect(x:x,y:y,width:0.64,height:0.64)
             let pixels = PersonAnchor(box:frame,isFace:true).inPixels(image.width,image.height)
             guard let crop = image.cropping(to:pixels) else { continue }
+            let raster = try recognitionRaster(crop)
             let faces = VNDetectFaceRectanglesRequest()
-            try VNImageRequestHandler(cgImage:try recognitionRaster(crop),options:[:]).perform([faces])
+            try VNImageRequestHandler(cgImage:raster,options:[:]).perform([faces])
+            var observations = (faces.results ?? []).filter { $0.confidence >= 0.75 }
+                .map { PersonAnchor(box:$0.boundingBox,isFace:true) }
+            observations += try objectPeople(raster).filter { ($0.objectScore ?? 0) >= 0.65 }
             let actual = CGRect(x:pixels.minX/CGFloat(image.width),y:1-pixels.maxY/CGFloat(image.height),
                                 width:pixels.width/CGFloat(image.width),height:pixels.height/CGFloat(image.height))
-            for face in faces.results ?? [] where face.confidence >= 0.75 {
-                let anchor = PersonAnchor(box:face.boundingBox,isFace:true).mapped(to:actual)
-                if !(known+found).contains(where:{ $0.isFace && $0.box.contains(CGPoint(x:anchor.box.midX,y:anchor.box.midY)) }) {
-                    found.append(anchor)
-                }
+            for observation in observations {
+                let anchor = observation.mapped(to:actual)
+                if !(known+found).contains(where:{ sameLocation(anchor,$0) }) { found.append(anchor) }
             }
         }
     }
@@ -230,35 +238,36 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
     let small = max(w,h) <= 256
     let raster = try recognitionRaster(thumb)
     var anchors = try nativePeople(raster,paddedRetry:max(w,h)<=96)
+    let neededObjectFirst = anchors.isEmpty
+    if neededObjectFirst {
+        trace.next("objectDetection")
+        anchors = try objectPeople(raster)
+        if anchors.isEmpty {
+            trace.recognition = "No corresponding person detection"
+            return Data()
+        }
+    }
     trace.next("segmentation")
     let primary = small ? try SemanticPeople.mask(thumb) : try visionMatte(thumb)
     trace.next("confirmation")
     var first = try selectPeople(primary,anchors:anchors)
-    var alternate: CVPixelBuffer?
-    if anchors.isEmpty && first.unconfirmedRegions == 0 {
-        // Two empty pixel proposals on a scene with no native localization can
-        // exit without loading the heavier object detector.
-        trace.next("fallback")
-        alternate = small ? try visionMatte(raster) : try SemanticPeople.mask(thumb)
-        let candidate = try selectPeople(alternate!,anchors:[])
-        if candidate.unconfirmedRegions == 0 {
-            trace.recognition = "No face, body or person matte found"
-            return Data()
-        }
-    }
-    if anchors.isEmpty || first.unconfirmedRegions > 0 || first.confirmed.count != anchors.count {
+    let originalCount = anchors.count
+    if !neededObjectFirst && (first.unconfirmedRegions > 0 || first.confirmed.count != anchors.count) {
         trace.next("objectDetection")
         anchors += try objectPeople(raster)
     }
-    if !anchors.isEmpty && small && (first.unconfirmedRegions > 0 || !anchors.contains(where:{ $0.isFace })) {
-        anchors += try neighborhoodFaces(thumb,known:anchors)
+    if small {
+        var distinct = [PersonAnchor]()
+        for anchor in anchors where !anchor.isFace && !distinct.contains(where:{ sameLocation(anchor,$0) }) {
+            distinct.append(anchor)
+        }
+        if distinct.count > 1 {
+            trace.next("neighborhood")
+            anchors += try neighborhoodPeople(thumb,known:anchors)
+        }
     }
-    guard !anchors.isEmpty else {
-        trace.recognition = "Proposed pixels had no corresponding person detection"
-        return Data()
-    }
-    trace.next("spatialAgreement")
-    if first.confirmed.count != anchors.count || first.unconfirmedRegions > 0 {
+    if anchors.count != originalCount {
+        trace.next("spatialAgreement")
         first = try selectPeople(primary,anchors:anchors)
     }
     var mattes = [first]
@@ -267,8 +276,8 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
         // Rescue a missing person using a different segmenter. A detector box
         // alone never authorizes painting unclassified pixels inside that box.
         trace.next("fallback")
-        if alternate == nil { alternate = small ? try visionMatte(raster,quality:.accurate) : try SemanticPeople.mask(thumb) }
-        let second = try selectPeople(alternate!,anchors:outstanding)
+        let alternate = small ? try visionMatte(raster,quality:.accurate) : try SemanticPeople.mask(thumb)
+        let second = try selectPeople(alternate,anchors:outstanding)
         mattes.append(second)
         let remaining = outstanding.indices.filter { !second.confirmed.contains($0) && (outstanding[$0].objectScore ?? 1) >= 0.7 }
             .sorted { outstanding[$0].isFace && !outstanding[$1].isFace }
@@ -283,6 +292,7 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
     if defaults["FILTER_TEST_OBSERVATIONS"] == "1" {
         trace.debugAnchors = anchors.prefix(32).map { a in
             [a.isFace ? 1 : 0,Double(a.objectScore ?? -1),a.box.minX,a.box.minY,a.box.width,a.box.height]
+                .map { (Double($0)*10_000).rounded()/10_000 }
         }
     }
     guard regions > 0 else { return Data() }

@@ -1,5 +1,5 @@
 """Manual public-CDN compatibility probe. Uses a temporary CA, scoped only to curl."""
-import os, subprocess, tempfile, json, time
+import hashlib, os, subprocess, tempfile, json, time
 from pathlib import Path
 from urllib.parse import urlsplit
 from PIL import Image
@@ -10,10 +10,12 @@ urls=[
     "https://images.thdstatic.com/productImages/aef2e809-5c73-488f-ae91-46706f3018de/svn/stark-claw-hammers-15000-64_65.jpg"
 ]
 login_url = "https://my.ny.gov/LoginV4/login.xhtml"
+gallery = next(row for row in json.loads(Path(__file__).with_name("person-fixtures.json").read_text())
+               if row["name"] == "gallery-3840")
 app=Path(os.environ["FILTER_TEST_APP"])/"Contents"
 with tempfile.TemporaryDirectory() as d:
     folder=Path(d)
-    env=dict(os.environ,FILTER_DOMAINS=json.dumps([urlsplit(u).hostname for u in [*urls,login_url]]),
+    env=dict(os.environ,FILTER_DOMAINS=json.dumps([urlsplit(u).hostname for u in [*urls,login_url,gallery["url"]]]),
              FILTER_TOKEN="public-test",FILTER_CAPTURE="1",FILTER_READY=str(folder/"ready"),
              FILTER_WORKER=str(app/"MacOS/MaskWorker"))
     proc=subprocess.Popen([app/"Helpers/mitmproxy.app/Contents/MacOS/mitmdump","-q","--listen-host","127.0.0.1","-p","17862",
@@ -31,6 +33,16 @@ with tempfile.TemporaryDirectory() as d:
                 print("Live CDN returned a decoded image",urlsplit(url).hostname,image.size,flush=True)
             except Exception as err:
                 print("::warning::Live CDN probe inconclusive or blocked: "+str(err),flush=True)
+        gallery_args = ["curl","--silent","--show-error","--fail","--max-time","30",
+                        "-H","Accept: image/avif,image/webp,image/*,*/*;q=0.8","-H","Sec-Fetch-Dest: image"]
+        direct = subprocess.run(gallery_args+["--noproxy","*",gallery["url"]],capture_output=True)
+        if direct.returncode == 0 and hashlib.sha256(direct.stdout).hexdigest() == gallery["sha256"]:
+            filtered = subprocess.check_output(gallery_args+["--noproxy","","--proxy","http://127.0.0.1:17862",
+                "--cacert",str(folder/"mitmproxy-ca-cert.pem"),gallery["url"]])
+            assert filtered == direct.stdout, "Public zoom response changed in transit"
+            print("Public Doona zoom response matched direct bytes",flush=True)
+        else:
+            print("::warning::Live gallery unavailable or changed. Packaged-worker and TLS replay verified separately.",flush=True)
         # Fetch only the public sign-in page, without redirects, cookies or credentials.
         for label, route in (("direct",["--noproxy","*"]), ("filtered",["--noproxy","","--proxy",
                 "http://127.0.0.1:17862","--cacert",str(folder/"mitmproxy-ca-cert.pem")])):

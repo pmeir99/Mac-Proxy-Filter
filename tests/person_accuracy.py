@@ -165,13 +165,12 @@ def coco_suite(path, scan):
             matte, meta, ms = scan(raw)
             latency.append(ms)
             counts[("TP" if matte is not None else "FN") if polygons else ("FP" if matte is not None else "TN")] += 1
-            counts["personPixels"] += truth.histogram()[255]
-            if matte is not None:
-                counts["maskedPixels"] += matte.histogram()[255]
-                counts["correctPixels"] += ImageChops.multiply(truth,matte).histogram()[255]
             annotated = truth.histogram()[255]
             shaded = 0 if matte is None else matte.histogram()[255]
             correct = 0 if matte is None else ImageChops.multiply(truth,matte).histogram()[255]
+            counts["personPixels"] += annotated
+            counts["maskedPixels"] += shaded
+            counts["correctPixels"] += correct
             person_coverage = []
             for poly in polygons:
                 instance = Image.new("L",(w,h))
