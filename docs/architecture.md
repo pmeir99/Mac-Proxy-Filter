@@ -8,7 +8,7 @@ Audit a release by recording its Git tag and downloading the matching source. Th
 | Sources/NetworkSetup.swift | HTTPS probe, local certificate trust, system proxy setup and restoration |
 | proxy/policy.py and admission.py | Destination selection for PAC, TLS and HTTP, plus reservations for concurrent image bodies |
 | proxy/filter.py | Image eligibility, HTTP content decoding, result cache, request-scoped settings, worker IPC and response selection |
-| Sources/Mask.swift and PersonMask.swift | ImageIO decode, local face and body detection, spatial confirmation of person mattes, crop retries, Core Image composition and PNG output |
+| Sources/Mask.swift, PersonMask.swift and FaceBoxes.swift | ImageIO decode, local face and body detection, spatial confirmation of person mattes, crop retries, Core Image composition and PNG output |
 | proxy/journal.py | Bounded in-memory event retention and filtered JSON or ZIP responses through the authenticated loopback endpoint |
 | Sources/Updates.swift and install-update.sh | Check GitHub, verify asset, stage the replacement and relaunch |
 | build.sh, tests/ and .github/workflows/verify.yml | Package the runtime and model, test HTTPS and Chrome rendering on macOS, and publish the winning runner’s ZIP |
@@ -26,7 +26,7 @@ Stages are elapsed wall time rounded to milliseconds. Absent fields mean the sta
 | connectMS, upstreamTLSMS | Upstream socket setup and TLS when newly established within this request. These intervals can overlap the intervals above. |
 | prepareMS, hashMS, queueMS | Decode HTTP content encoding, validate and snapshot settings, then hash input and wait for the serialized worker |
 | workerMS | Worker startup if needed, IPC, native processing and result transfer combined |
-| decodeMS, localizationMS, segmentationMS, confirmationMS, fallbackMS | Within worker time, prepare the oriented thumbnail, locate people, propose and confirm person pixels, and retry unresolved locations |
+| decodeMS, localizationMS, faceLandmarksMS, objectDetectionMS, segmentationMS, confirmationMS, handPoseMS, fallbackMS | Within worker time, prepare the oriented thumbnail, locate people, propose and confirm person pixels, and retry unresolved locations |
 | composeGraphMS, renderEncodeMS | Within worker time, construct the Core Image graph, then execute it and encode the output |
 
 Worker stages are nested within workerMS. Adding every number double-counts that interval. For a transport error before an HTTP response, status 0 means no downstream HTTP status was available. Origin metadata is recorded only if response headers reached image classification. Error text can contain host or system details. Review exported metadata before sharing.
@@ -41,4 +41,8 @@ The product test fetches content-address-checked public photos listed in `tests/
 
 The COCO128-seg sample comes from the [Ultralytics dataset release](https://github.com/ultralytics/assets/releases/download/v0.0.0/coco128-seg.zip). Class 0 polygons provide a person reference on 128 images. Pixel precision is the fraction of masked pixels inside a labeled person. Pixel recall is the fraction of annotated person pixels covered. These are regression measurements on a fixed sample, with incomplete labels possible. The sample includes COCO training images and cannot establish performance on unseen photos. Test photos and labels are never included in the app or requested during filtering.
 
-Build-time model sources are Apple’s Core ML versions of YOLOv3 (8-bit LUT) and DeepLabV3 (FP16), verified by SHA-256 before compilation. The YOLO detector accepts the top label only when it is `person`. A detection rectangle alone cannot paint the image. The app requires spatial overlap with actual person-class pixels. The Activity detail and single-request export include the recognition summary for fresh and cached decisions.
+The build verifies Apple’s Core ML versions of YOLOv3 (8-bit LUT) and DeepLabV3 (FP16). The app also bundles a 218 KB Core ML conversion of the [OpenCV Zoo YuNet face detector](https://github.com/opencv/opencv_zoo/tree/main/models/face_detection_yunet). Its MIT notice and reproducible conversion script are in this repository. All three models run on the Mac.
+
+The worker accepts YOLO detections whose top class is person. It tests connected person-class pixels against independent body, face or hand evidence at the same location. A five-landmark face can fill a local oval where segmentation missed part of the face if a second detector or a matching person matte confirms the location. Nearby people retain separate bounds in rectangle mode. The Activity detail and single-request export include the recognition summary for fresh and cached decisions.
+
+CI builds the pinned preview 145 worker and scores it on the same runner, images and annotations as the candidate. The candidate must clear every empty-product fixture, retain the marked person regions and leave merchandise between people untouched. On the COCO sample it must identify at least as many person-containing images as the control, make at most six false image decisions on negatives, achieve at least 72% person-pixel precision and stay within 2.5 percentage points of the control’s person-pixel recall. A byte-identical replay of the original zoom response is tested through the proxy.

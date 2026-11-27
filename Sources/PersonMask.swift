@@ -12,12 +12,8 @@ struct PersonAnchor {
     let box: CGRect
     let isFace: Bool
     var objectScore: Float? = nil
-
-    func mapped(to frame: CGRect) -> PersonAnchor {
-        let dst = CGRect(x:frame.minX+box.minX*frame.width,y:frame.minY+box.minY*frame.height,
-                         width:box.width*frame.width,height:box.height*frame.height)
-        return PersonAnchor(box:dst,isFace:isFace,objectScore:objectScore)
-    }
+    var landmarks = false
+    var hand = false
 
     func inPixels(_ width: Int, _ height: Int) -> CGRect {
         CGRect(x: box.minX * CGFloat(width), y: (1 - box.maxY) * CGFloat(height),

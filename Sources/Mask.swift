@@ -164,34 +164,26 @@ func nativePeople(_ opaque: CGImage, paddedRetry: Bool) throws -> [PersonAnchor]
 func sameLocation(_ a: PersonAnchor, _ b: PersonAnchor) -> Bool {
     guard a.isFace == b.isFace else { return false }
     let overlap = a.box.intersection(b.box)
+    guard !overlap.isEmpty else { return false }
     let intersection = overlap.width*overlap.height
     return intersection > 0.6 * min(a.box.width*a.box.height,b.box.width*b.box.height)
 }
 
-// A thumbnail may contain several people at very different scales. Only a
-// scene already containing several distinct detections gets the four tile passes.
-func neighborhoodPeople(_ image: CGImage, known: [PersonAnchor]) throws -> [PersonAnchor] {
-    var found = [PersonAnchor]()
-    for y in [0.0, 0.36] {
-        for x in [0.0, 0.36] {
-            let frame = CGRect(x:x,y:y,width:0.64,height:0.64)
-            let pixels = PersonAnchor(box:frame,isFace:true).inPixels(image.width,image.height)
-            guard let crop = image.cropping(to:pixels) else { continue }
-            let raster = try recognitionRaster(crop)
-            let faces = VNDetectFaceRectanglesRequest()
-            try VNImageRequestHandler(cgImage:raster,options:[:]).perform([faces])
-            var observations = (faces.results ?? []).filter { $0.confidence >= 0.75 }
-                .map { PersonAnchor(box:$0.boundingBox,isFace:true) }
-            observations += try objectPeople(raster).filter { ($0.objectScore ?? 0) >= 0.65 }
-            let actual = CGRect(x:pixels.minX/CGFloat(image.width),y:1-pixels.maxY/CGFloat(image.height),
-                                width:pixels.width/CGFloat(image.width),height:pixels.height/CGFloat(image.height))
-            for observation in observations {
-                let anchor = observation.mapped(to:actual)
-                if !(known+found).contains(where:{ sameLocation(anchor,$0) }) { found.append(anchor) }
-            }
-        }
+func hands(_ image: CGImage) throws -> [PersonAnchor] {
+    let request = VNDetectHumanHandPoseRequest()
+    request.maximumHandCount = 4
+    try VNImageRequestHandler(cgImage:image,options:[:]).perform([request])
+    return try (request.results ?? []).compactMap { observation in
+        let joints = try observation.recognizedPoints(.all)
+        guard let wrist = joints[.wrist], wrist.confidence >= 0.4 else { return nil }
+        let tips: [VNHumanHandPoseObservation.JointName] = [.thumbTip,.indexTip,.middleTip,.ringTip,.littleTip]
+        guard tips.filter({ (joints[$0]?.confidence ?? 0) >= 0.4 }).count >= 2 else { return nil }
+        let points = joints.values.filter { $0.confidence >= 0.4 }.map(\.location)
+        guard points.count >= 7, let x0 = points.map(\.x).min(), let x1 = points.map(\.x).max(),
+              let y0 = points.map(\.y).min(), let y1 = points.map(\.y).max(), x1>x0, y1>y0 else { return nil }
+        let box = CGRect(x:x0,y:y0,width:x1-x0,height:y1-y0)
+        return PersonAnchor(box:box,isFace:false,hand:true)
     }
-    return found
 }
 
 // Give a small or seated subject its own analysis scale. Candidates still need
@@ -210,7 +202,7 @@ func rescue(_ anchor: PersonAnchor, in image: CGImage) throws -> SelectedMatte? 
                        width:crop.width/CGFloat(width), height:crop.height/CGFloat(height))
     let local = CGRect(x:(anchor.box.minX-frame.minX)/frame.width, y:(anchor.box.minY-frame.minY)/frame.height,
                        width:anchor.box.width/frame.width,height:anchor.box.height/frame.height)
-    var selection = try selectPeople(SemanticPeople.mask(cutout),anchors:[PersonAnchor(box:local,isFace:anchor.isFace,objectScore:anchor.objectScore)])
+    var selection = try selectPeople(SemanticPeople.mask(cutout),anchors:[PersonAnchor(box:local,isFace:anchor.isFace,objectScore:anchor.objectScore,landmarks:anchor.landmarks,hand:anchor.hand)])
     guard selection.image != nil else { return nil }
     selection.frame = frame
     selection.regions = selection.regions.map {
@@ -238,40 +230,30 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
     let small = max(w,h) <= 256
     let raster = try recognitionRaster(thumb)
     var anchors = try nativePeople(raster,paddedRetry:max(w,h)<=96)
-    let neededObjectFirst = anchors.isEmpty
-    if neededObjectFirst {
-        trace.next("objectDetection")
-        anchors = try objectPeople(raster)
-        if anchors.isEmpty {
-            trace.recognition = "No corresponding person detection"
-            return Data()
-        }
-    }
+    trace.next("faceLandmarks")
+    anchors += try FaceBoxes.detect(thumb)
+    trace.next("objectDetection")
+    anchors += try objectPeople(raster)
     trace.next("segmentation")
     let primary = small ? try SemanticPeople.mask(thumb) : try visionMatte(thumb)
     trace.next("confirmation")
     var first = try selectPeople(primary,anchors:anchors)
-    let originalCount = anchors.count
-    if !neededObjectFirst && (first.unconfirmedRegions > 0 || first.confirmed.count != anchors.count) {
-        trace.next("objectDetection")
-        anchors += try objectPeople(raster)
-    }
-    if small {
-        var distinct = [PersonAnchor]()
-        for anchor in anchors where !anchor.isFace && !distinct.contains(where:{ sameLocation(anchor,$0) }) {
-            distinct.append(anchor)
-        }
-        if distinct.count > 1 {
-            trace.next("neighborhood")
-            anchors += try neighborhoodPeople(thumb,known:anchors)
+    if first.unconfirmedRegions > 0 || first.regions.isEmpty && !anchors.isEmpty {
+        trace.next("handPose")
+        let partial = try hands(raster)
+        if !partial.isEmpty {
+            anchors += partial
+            first = try selectPeople(primary,anchors:anchors)
         }
     }
-    if anchors.count != originalCount {
-        trace.next("spatialAgreement")
-        first = try selectPeople(primary,anchors:anchors)
+    guard !anchors.isEmpty else {
+        trace.recognition = "No corresponding person detection"
+        return Data()
     }
+    var confirmed = first.confirmed
     var mattes = [first]
-    let outstanding = anchors.indices.filter { !first.confirmed.contains($0) }.map { anchors[$0] }
+    let missing = anchors.indices.filter { !confirmed.contains($0) }
+    let outstanding = missing.map { anchors[$0] }
     if !outstanding.isEmpty {
         // Rescue a missing person using a different segmenter. A detector box
         // alone never authorizes painting unclassified pixels inside that box.
@@ -279,16 +261,33 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
         let alternate = small ? try visionMatte(raster,quality:.accurate) : try SemanticPeople.mask(thumb)
         let second = try selectPeople(alternate,anchors:outstanding)
         mattes.append(second)
+        confirmed.formUnion(second.confirmed.map { missing[$0] })
         let remaining = outstanding.indices.filter { !second.confirmed.contains($0) && (outstanding[$0].objectScore ?? 1) >= 0.7 }
             .sorted { outstanding[$0].isFace && !outstanding[$1].isFace }
         for index in remaining.prefix(6) {
-            if let recovered = try rescue(outstanding[index],in:thumb) { mattes.append(recovered) }
+            if let recovered = try rescue(outstanding[index],in:thumb) {
+                mattes.append(recovered)
+                confirmed.insert(missing[index])
+            }
         }
     }
-    let regions = mattes.reduce(0) { $0 + $1.regions.count }
+    // A verified face can contain a hole in either segmenter (babies, shadows
+    // and tightly cropped heads). Fill only its local oval, and only with a
+    // second source of evidence in the same location.
+    let faceOvals = anchors.indices.compactMap { index -> CGRect? in
+        let a = anchors[index]
+        guard a.landmarks else { return nil }
+        let center = CGPoint(x:a.box.midX,y:a.box.midY)
+        let corroborated = confirmed.contains(index) || anchors.contains { other in
+            !other.landmarks && !other.hand && other.box.contains(center)
+        }
+        return corroborated ? a.box : nil
+    }
+    let regions = mattes.reduce(0) { $0 + $1.regions.count } + faceOvals.count
     let faces = anchors.filter(\.isFace).count
     let objects = anchors.filter { $0.objectScore != nil }.count
-    trace.recognition = "\(regions) confirmed regions · \(anchors.count-faces-objects) Vision bodies, \(faces) faces, \(objects) object-model person detections"
+    let handCount = anchors.filter(\.hand).count
+    trace.recognition = "\(regions) confirmed regions · \(anchors.count-faces-objects-handCount) Vision bodies, \(faces) faces, \(handCount) hands, \(objects) object-model person detections"
     if defaults["FILTER_TEST_OBSERVATIONS"] == "1" {
         trace.debugAnchors = anchors.prefix(32).map { a in
             [a.isFace ? 1 : 0,Double(a.objectScore ?? -1),a.box.minX,a.box.minY,a.box.width,a.box.height]
@@ -301,7 +300,7 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
     let margin = min(0.2,max(0,Double(env["FILTER_MARGIN"] ?? "") ?? 0)) * min(rect.width,rect.height)
     var mask = CIImage(color:.black).cropped(to:rect)
     if env["FILTER_SHAPE"] == "Rectangle" {
-        for region in mattes.flatMap(\.regions) {
+        for region in mattes.flatMap(\.regions) + faceOvals {
             let box = CGRect(x:rect.minX+region.minX*rect.width,y:rect.minY+region.minY*rect.height,
                              width:region.width*rect.width,height:region.height*rect.height).insetBy(dx:-margin,dy:-margin)
             mask = CIImage(color:.white).cropped(to:box).composited(over:mask).cropped(to:rect)
@@ -315,6 +314,17 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
                 .transformed(by:CGAffineTransform(translationX:rect.minX+frame.minX*rect.width,
                                                   y:rect.minY+frame.minY*rect.height))
             mask = aligned.applyingFilter("CIMaximumCompositing",parameters:[kCIInputBackgroundImageKey:mask]).cropped(to:rect)
+        }
+        for face in faceOvals {
+            let box = CGRect(x:rect.minX+face.minX*rect.width,y:rect.minY+face.minY*rect.height,
+                             width:face.width*rect.width,height:face.height*rect.height)
+            guard let circle = CIFilter(name:"CIRadialGradient",parameters:["inputCenter":CIVector(x:0,y:0),
+                "inputRadius0":0.99,"inputRadius1":1.0,"inputColor0":CIColor.white,"inputColor1":CIColor.black])?.outputImage else {
+                throw ScanFailure.unsupported
+            }
+            let oval = circle.transformed(by:CGAffineTransform(scaleX:box.width/2,y:box.height/2))
+                .transformed(by:CGAffineTransform(translationX:box.midX,y:box.midY)).cropped(to:box)
+            mask = oval.applyingFilter("CIMaximumCompositing",parameters:[kCIInputBackgroundImageKey:mask]).cropped(to:rect)
         }
         if margin > 0 { mask = mask.applyingFilter("CIMorphologyMaximum",parameters:["inputRadius":margin]).cropped(to:rect) }
     }

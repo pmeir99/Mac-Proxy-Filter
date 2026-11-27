@@ -30,10 +30,12 @@ xcrun coremlcompiler compile "$stage/DeepLabV3FP16.mlmodel" "$app/Resources"
 curl -fsSL --retry 3 'https://ml-assets.apple.com/coreml/models/Image/ObjectDetection/YOLOv3/YOLOv3Int8LUT.mlmodel' -o "$stage/YOLOv3Int8LUT.mlmodel"
 echo "0e32f297ad9cfc0ea8e67276867956488c7ee10dc87c057da4debc939e20b76d  $stage/YOLOv3Int8LUT.mlmodel" | shasum -a 256 -c -
 xcrun coremlcompiler compile "$stage/YOLOv3Int8LUT.mlmodel" "$app/Resources"
+xcrun coremlcompiler compile models/YuNet.mlmodel "$app/Resources"
+cp licenses/yunet.txt "$app/Resources/YuNet-LICENSE.txt"
 cp licenses/yolov3.txt "$app/Resources/YOLOv3-Notices.txt"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 cp Sources/Mask.swift "$stage/main.swift"
-xcrun swiftc -O "$stage/main.swift" Sources/PersonMask.swift -o "$app/MacOS/MaskWorker"
+xcrun swiftc -O "$stage/main.swift" Sources/PersonMask.swift Sources/FaceBoxes.swift -o "$app/MacOS/MaskWorker"
 xcrun swiftc -O -parse-as-library Sources/App.swift Sources/NetworkSetup.swift Sources/Interface.swift Sources/ActivityFilters.swift Sources/Updates.swift -o "$app/MacOS/MacProxyFilter"
 mkdir -p "$stage/Filter.iconset"
 for size in 16 32 128 256 512; do

@@ -144,7 +144,7 @@ def product_suite(directory, fixtures, portrait, scan):
     return errors
 
 
-def coco_suite(path, scan):
+def coco_suite(path, scan, label):
     counts = Counter()
     latency = []
     detail = []
@@ -185,9 +185,9 @@ def coco_suite(path, scan):
     if output := os.getenv("FILTER_TEST_EVIDENCE"):
         folder = Path(output)
         folder.mkdir(parents=True,exist_ok=True)
-        (folder/"person-accuracy.json").write_text(json.dumps({"counts":dict(counts),"images":detail},indent=2))
+        (folder/f"person-accuracy{'-reference' if label == 'preview145' else ''}.json").write_text(json.dumps({"counts":dict(counts),"images":detail},indent=2))
     assert len(latency) == 128
-    print("COCO128-seg",dict(counts),"pixel precision",round(counts["correctPixels"]/max(1,counts["maskedPixels"]),3),
+    print("COCO128-seg",label,dict(counts),"pixel precision",round(counts["correctPixels"]/max(1,counts["maskedPixels"]),3),
           "pixel recall",round(counts["correctPixels"]/counts["personPixels"],3),
           "median worker ms",round(statistics.median(latency),1),flush=True)
     return counts
@@ -198,19 +198,30 @@ def main():
     parser.add_argument("worker",type=Path)
     parser.add_argument("fixture_directory",type=Path)
     parser.add_argument("portrait",type=Path)
+    parser.add_argument("--reference-worker",type=Path,help="Pinned preview 145 worker built for the same Mac")
     args = parser.parse_args()
     fixtures = json.loads(CASES.read_text())
     args.fixture_directory.mkdir(parents=True,exist_ok=True)
     with ThreadPoolExecutor(max_workers=4) as pool:
         list(pool.map(lambda item: download(args.fixture_directory,item), [*fixtures,COCO]))
+    reference = None
+    if args.reference_worker:
+        with worker_session(args.reference_worker) as scan:
+            print("Reference worker, preview 145",flush=True)
+            product_suite(args.fixture_directory,fixtures,args.portrait,scan)
+            reference = coco_suite(args.fixture_directory/COCO["name"],scan,"preview145")
+    print("Candidate worker",flush=True)
     with worker_session(args.worker) as scan:
         errors = product_suite(args.fixture_directory,fixtures,args.portrait,scan)
         for error in errors: print("REGRESSION",error,flush=True)
-        counts = coco_suite(args.fixture_directory/COCO["name"],scan)
-        if counts["TP"] < 52 or counts["FP"] > 6:
+        counts = coco_suite(args.fixture_directory/COCO["name"],scan,"candidate")
+        minimum_detections = reference["TP"] if reference is not None else 52
+        maximum_false = min(6,reference["FP"]) if reference is not None else 6
+        minimum_recall = reference["correctPixels"]/reference["personPixels"]-0.025 if reference is not None else 0.89
+        if counts["TP"] < minimum_detections or counts["FP"] > maximum_false:
             errors.append("COCO image-level recall or false-positive budget failed")
         if (counts["correctPixels"] / max(1,counts["maskedPixels"]) < 0.72 or
-            counts["correctPixels"] / counts["personPixels"] < 0.89):
+            counts["correctPixels"] / counts["personPixels"] < minimum_recall):
             errors.append("COCO pixel-level precision or coverage budget failed")
     if errors:
         raise SystemExit(f"{len(errors)} accuracy regressions: " + " | ".join(errors))
