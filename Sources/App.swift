@@ -17,10 +17,15 @@ final class Controller: ObservableObject {
     @Published var activity = ""
     @Published var events = [Event]()
     private var token = ""
-    func diagnostics(_ path:String,site:String = "", outcome:String = "All", images:Bool = false) async throws -> Data {
+    func diagnostics(_ path:String,site:String = "", outcome:String = "All", images:Bool = false, ids:[String]? = nil) async throws -> Data {
         var components = URLComponents(string:"http://127.0.0.1:17861/"+path)!
         components.queryItems = [URLQueryItem(name:"site",value:site), URLQueryItem(name:"outcome",value:outcome), URLQueryItem(name:"images",value:images ? "1" : "0")]
         var request = URLRequest(url:components.url!)
+        if let ids {
+            request.httpMethod = "POST"
+            request.httpBody = try JSONEncoder().encode(ids)
+            request.setValue("application/json", forHTTPHeaderField:"Content-Type")
+        }
         request.setValue("Bearer "+token,forHTTPHeaderField:"Authorization")
         let (data,response) = try await URLSession.shared.data(for:request)
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw NetworkSetup.failure("Diagnostics unavailable") }

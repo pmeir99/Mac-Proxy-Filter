@@ -6,6 +6,7 @@ struct Event: Codable, Identifiable {
     let id, site, host, verdict, mime: String
     struct Origin: Codable { let status: Int; let encoding, declaredLength: String; let noTransform, partial: Bool }
     let origin: Origin?
+    let searchText, path: String?
     let outcome, method: String
     let failure: String?
     let processing: [String:Int]
@@ -25,12 +26,53 @@ struct Interface: View {
     @AppStorage("capture") var capture = false
     @AppStorage("captureImages") var captureImages = false
     @State private var exportImages = false
-    @State private var outcome = "All"
+    @State private var decisions = Set<String>()
+    @State private var hosts = Set<String>()
+    @State private var methods = Set<String>()
+    @State private var statuses = Set<String>()
+    @State private var types = Set<String>()
+    @State private var durations = ""
     @State private var selection: String?
     @State private var site = ""
     @State private var notice = ""
     @State private var busy = false
-    var visible: [Event] { model.events.filter { (outcome == "All" || $0.outcome == outcome) && (site.isEmpty || $0.host.lowercased() == site.lowercased() || $0.site.lowercased() == site.lowercased()) } }
+    // Inclusive comma-separated millisecond intervals, exact values and open upper bounds.
+    var ranges: [ClosedRange<Int>]? {
+        var result = [ClosedRange<Int>]()
+        for token in durations.split(separator:",") {
+            let t = token.trimmingCharacters(in:.whitespaces)
+            if t.hasSuffix("+"), let n = Int(t.dropLast()), n >= 0 { result.append(n...Int.max); continue }
+            let parts = t.components(separatedBy:"-").map { $0.trimmingCharacters(in:.whitespaces) }
+            guard parts.count <= 2, let low = Int(parts[0]), let high = Int(parts.last ?? ""),
+                  low >= 0, high >= low else { return nil }
+            result.append(low...high)
+        }
+        return result
+    }
+    var visible: [Event] {
+        guard let ranges else { return [] }
+        let searches = site.lowercased().split(separator:",").map { $0.split(whereSeparator: \.isWhitespace).map(String.init) }.filter { !$0.isEmpty }
+        return model.events.filter { event in
+            let text = event.searchText ?? ""
+            return (searches.isEmpty || searches.contains { terms in terms.allSatisfy { text.contains($0) } })
+                && (decisions.isEmpty || decisions.contains(event.outcome))
+                && (hosts.isEmpty || hosts.contains(event.host) || hosts.contains(event.site))
+                && (methods.isEmpty || methods.contains(event.method))
+                && (types.isEmpty || types.contains(event.mime))
+                && (statuses.isEmpty || statuses.contains(String(event.status)))
+                && (ranges.isEmpty || ranges.contains { $0.contains(event.elapsedMS) })
+        }
+    }
+    func choices(_ title:String, _ options:[String], _ selected:Binding<Set<String>>) -> some View {
+        Menu(selected.wrappedValue.isEmpty ? title : "\(title) (\(selected.wrappedValue.count))") {
+            Button("All") { selected.wrappedValue.removeAll() }
+            ForEach(Set(options).union(selected.wrappedValue).sorted(), id:\.self) { item in
+                Toggle(item.isEmpty ? "Unspecified" : item, isOn:Binding(
+                    get:{ selected.wrappedValue.contains(item) },
+                    set:{ on in if on { selected.wrappedValue.insert(item) } else { selected.wrappedValue.remove(item) } }))
+            }
+        }
+    }
     var body: some View {
         TabView {
             Form {
@@ -82,11 +124,21 @@ struct Interface: View {
                 Text("Choose capture options before starting. Records stay in memory for up to five minutes. Retained images can contain original unmasked content.").font(.caption)
                 Text(model.activity).font(.callout)
                 HStack {
-                    TextField("Exact referring or image hostname",text:$site)
-                    Picker("Decision",selection:$outcome) {
-                        ForEach(["All","Clear","Masked","Blocked","Error","Upstream","Pass-through"],id:\.self) { Text($0) }
+                    TextField("Search recorded fields · commas mean OR",text:$site)
+                    TextField("Total ms · e.g. 0-100, 500+",text:$durations).frame(maxWidth:220)
+                }
+                if ranges == nil { Text("Enter milliseconds as 100, 100-250, or 500+.").foregroundStyle(.red) }
+                HStack {
+                    choices("Decision",model.events.map(\.outcome),$decisions)
+                    choices("Host",model.events.flatMap { [$0.host,$0.site] }.filter { !$0.isEmpty },$hosts)
+                    choices("Method",model.events.map(\.method),$methods)
+                    choices("Status",model.events.map { String($0.status) },$statuses)
+                    choices("Type",model.events.map(\.mime),$types)
+                    Button("Reset") {
+                        site = ""; durations = ""; decisions = []; hosts = []; statuses = []; methods = []; types = []
                     }
                 }
+                Text("\(visible.count) matching records").font(.caption)
                 Table(visible, selection:$selection) {
                     TableColumn("Image host",value:\.host)
                     TableColumn("Decision",value:\.verdict)
@@ -96,6 +148,7 @@ struct Interface: View {
                     ScrollView {
                         VStack(alignment:.leading,spacing:4) {
                             Text(Date(timeIntervalSince1970:event.time).formatted() + " · " + event.method + " · " + event.mime)
+                            if let path = event.path { Text(path).lineLimit(2) }
                             Text("Referring host " + (event.site.isEmpty ? "unavailable" : event.site))
                             Text("Response \(event.status) · input \(event.beforeBytes) bytes · output \(event.afterBytes) bytes")
                             if let origin = event.origin {
@@ -128,7 +181,7 @@ struct Interface: View {
         busy = true
         Task {
             defer { busy = false }
-            do { let bytes = try await model.diagnostics("export",site:site,outcome:outcome,images:captureImages && exportImages); try bytes.write(to:url,options:.atomic); notice = "Saved "+url.lastPathComponent }
+            do { let bytes = try await model.diagnostics("export",images:captureImages && exportImages,ids:visible.map(\.id)); try bytes.write(to:url,options:.atomic); notice = "Saved "+url.lastPathComponent }
             catch { notice = error.localizedDescription }
         }
     }

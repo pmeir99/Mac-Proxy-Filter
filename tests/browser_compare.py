@@ -36,7 +36,11 @@ def compare(directory, prefix_sent, finish_image):
         bounds, before = capture(["--no-proxy-server"])
         import base64
         embedded = base64.b64encode((directory / "portrait.png").read_bytes()).decode()
+        icon = BytesIO()
+        Image.new("RGB",(32,32),"blue").save(icon,format="PNG")
+        encoded_icon = base64.b64encode(icon.getvalue()).decode()
         (directory / "inline.html").write_text(
+            f'<img id="icon" src="data:image/png;base64,{encoded_icon}">' 
             f'<img id="embedded" src="data:image/png;base64,{embedded}">'
             '<img id="network" src="/portrait.png">')
         prefix_sent.clear()
@@ -47,6 +51,7 @@ def compare(directory, prefix_sent, finish_image):
             response = tab.goto("http://origin.test:18280/inline.html")
             assert "img-src http: https:" in response.headers.get("content-security-policy","")
             assert tab.locator("#embedded").evaluate("img => img.complete && img.naturalWidth === 0")
+            assert tab.locator("#icon").evaluate("async img => {await img.decode(); return img.naturalWidth === 32 && img.src.includes('/.well-known/');}")
             tab.locator("#network").evaluate("img => img.decode()")
             rejected = tab.evaluate("""async () => {
                 const content = await (await fetch('/portrait.png')).blob();

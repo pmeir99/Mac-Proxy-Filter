@@ -37,6 +37,14 @@ with tempfile.TemporaryDirectory() as temp:
             self.do_GET()
 
         def do_GET(self):
+            if self.path == "/oversize-preview.png":
+                self.send_response(200)
+                self.send_header("Content-Type", "image/png")
+                self.end_headers()
+                try:
+                    for _ in range(130): self.wfile.write(bytes(65536))
+                except (BrokenPipeError, ConnectionResetError): pass
+                return
             if self.path in ("/opaque-asset", "/error-image", "/redirect-image"):
                 data = (work/"portrait.png").read_bytes()
                 self.send_response({"/opaque-asset":200, "/error-image":404, "/redirect-image":302}[self.path])
@@ -192,7 +200,11 @@ with tempfile.TemporaryDirectory() as temp:
         for path, status in (("error-image",403),("redirect-image",302)):
             output=subprocess.check_output(curl+["-w","%{http_code}","https://origin.test:18243/"+path])
             assert output==str(status).encode(), "Origin image body escaped on "+path
-        assert subprocess.check_output(curl+["https://origin.test:18243/unscanned.jpg","-w","%{http_code}"])==b"403"
+        assert subprocess.check_output(curl+["--fail","https://origin.test:18243/unscanned.jpg"]) == (work/"out-portrait.png").read_bytes()
+        oversize = subprocess.run(curl+["--fail","https://origin.test:18243/oversize-preview.png"],capture_output=True)
+        assert oversize.returncode != 0 and not oversize.stdout, "Oversized unknown-length original escaped"
+        Image.open(work/"coffee.png").save(work/"favicon.ico", sizes=[(16,16),(32,32),(48,48)])
+        assert subprocess.check_output(curl+["--fail","https://origin.test:18243/favicon.ico"]) == (work/"favicon.ico").read_bytes()
         pac=subprocess.check_output(["curl","--silent","--noproxy","*","http://127.0.0.1:17861/proxy.pac?revision=test"])
         assert b"FindProxyForURL" in pac
         settings.write_text(json.dumps({"FILTER_STYLE":"Cover","FILTER_COLOR":"FD019C","FILTER_SHAPE":"Rectangle"}))
@@ -222,6 +234,11 @@ with tempfile.TemporaryDirectory() as temp:
             assert rows and all(r["outcome"]=="Masked" and "before" not in r for r in rows)
             assert all(not name.startswith("images/") for name in report.namelist())
             assert any("segmentationMS" in r["processing"] for r in rows)
+        events=json.loads(subprocess.check_output(diagnostic+["http://127.0.0.1:17861/events"]))
+        selected=[e["id"] for e in events if "portrait" in e["searchText"]][:2]
+        assert selected
+        with ZipFile(BytesIO(subprocess.check_output(diagnostic+["--data-binary", json.dumps(selected), export_url]))) as report:
+            assert {r["id"] for r in json.loads(report.read("manifest.json"))} == set(selected)
         compare(work, prefix_sent, finish_image)
         if env.get("FILTER_ALL") != "1" and os.getenv("GITHUB_ACTIONS") == "true": verify_running_chrome(work)
         stats=json.loads(subprocess.check_output(["curl","--noproxy","*","--silent","http://127.0.0.1:17861/status"]))

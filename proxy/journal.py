@@ -34,6 +34,7 @@ class Journal:
                    else verdict if verdict in ("Masked","Clear","Pass-through") else "Upstream")
         row["outcome"] = outcome
         row["method"] = flow.request.method
+        row["path"] = flow.request.path.partition("?")[0][:512]
         if "failure" in flow.metadata: row["failure"] = flow.metadata["failure"]
         processing = dict(flow.metadata.get("timing", {}))
         if "headersAt" in flow.metadata:
@@ -51,12 +52,15 @@ class Journal:
         self.size += len(before)+len(after)
         self.prune()
 
-    def report(self, site, archive, outcome="All", images=False):
+    def report(self, site, archive, outcome="All", images=False, ids=None):
         self.prune()
         entries=[e for e in self.entries if not site or site.lower() in (e[0]["site"].lower(),e[0]["host"].lower())]
         entries = [e for e in entries if outcome == "All" or e[0]["outcome"] == outcome]
+        if ids is not None:
+            entries = [e for e in entries if e[0]["id"] in ids]
         if not archive:
-            return json.dumps([e[0] for e in reversed(entries)]).encode()
+            return json.dumps([dict(row, searchText=json.dumps(row, ensure_ascii=False).lower())
+                               for row, _, _ in reversed(entries)]).encode()
         data=BytesIO()
         rows=[]
         with ZipFile(data,"w") as zip:

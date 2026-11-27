@@ -16,16 +16,23 @@ from mitmproxy import ctx, http
 # Keep imports from creating files inside the signed app bundle.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from body_limit import install as install_body_limit
 from admission import Admission
+from icons import representations
+from inline_icons import Icons, PREFIX
 from journal import Journal
 from policy import domains, pac, tls_pattern, host_pattern
 
 LIMIT = 8 * 1024 * 1024
 TYPES = {"image/jpeg", "image/png", "image/webp", "image/avif", "image/jpg", "image/pjpeg", "image/x-png", "image/gif", "image/bmp", "image/tiff", "image/heic", "image/heif", "image/x-icon", "image/vnd.microsoft.icon"}
 
+IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif",
+                                    ".bmp", ".tif", ".tiff", ".ico", ".svg", ".jxl", ".apng")
+
 class Filter:
     def __init__(self):
         self.hosts = set(domains(json.loads(os.environ["FILTER_DOMAINS"])))
+        self.inline_icons = Icons()
         self.journal = Journal(images=os.getenv("FILTER_CAPTURE_IMAGES") == "1")
         self.capture = os.getenv("FILTER_CAPTURE") == "1"
         self.token = os.getenv("FILTER_TOKEN","")
@@ -41,6 +48,7 @@ class Filter:
         self.parent_watch = None
 
     def load(self, loader):
+        install_body_limit()
         ctx.options.update(allow_hosts=[tls_pattern(*self.scope)])
 
     async def running(self):
@@ -72,13 +80,23 @@ class Filter:
                 status, body = "200 OK", json.dumps(self.counts).encode()
             mime = "application/x-ns-proxy-autoconfig" if valid else "application/json"
             first = headers.split(b"\r\n",1)[0].split(b" ")
-            if len(first)==3 and first[0]==b"GET":
+            if len(first)==3 and first[0] in (b"GET",b"POST"):
                 target = urlsplit(first[1].decode("ascii"))
                 authorized = self.token and any(hmac.compare_digest(line, b"Authorization: Bearer "+self.token.encode()) for line in headers.split(b"\r\n"))
                 if authorized and target.path in ("/events","/export"):
                     export = target.path == "/export"
                     query = parse_qs(target.query)
-                    body = self.journal.report(query.get("site",[""])[0],export,query.get("outcome",["All"])[0],query.get("images",["0"])[0]=="1")
+                    ids = None
+                    if first[0] == b"POST":
+                        if not export: raise ValueError("Invalid endpoint")
+                        length = next((int(line.split(b":",1)[1]) for line in headers.split(b"\r\n")
+                                       if line.lower().startswith(b"content-length:")), 0)
+                        if not 0 < length <= 65536: raise ValueError("Invalid selection length")
+                        selection = json.loads(await asyncio.wait_for(reader.readexactly(length), 3))
+                        if not isinstance(selection, list) or not all(isinstance(i,str) for i in selection):
+                            raise ValueError("Invalid selection")
+                        ids = set(selection)
+                    body = self.journal.report(query.get("site",[""])[0],export,query.get("outcome",["All"])[0],query.get("images",["0"])[0]=="1",ids)
                     status = "200 OK"
                     mime = "application/zip" if export else "application/json"
             writer.write((f"HTTP/1.1 {status}\r\nContent-Type: {mime}\r\n"
@@ -102,27 +120,78 @@ class Filter:
         else:
             flow.metadata["started"] = time.monotonic()
             self.counts["requests"] += 1
-            if flow.request.headers.get("sec-fetch-dest") == "image":
+            if flow.request.path.startswith(PREFIX):
+                if flow.request.method != "GET" or flow.request.headers.get("content-length","0") != "0" or "transfer-encoding" in flow.request.headers:
+                    flow.response = http.Response.make(405,b"")
+                    return
+                origin = f"{flow.request.scheme}://{flow.request.host.lower()}:{flow.request.port}"
+                raw = self.inline_icons.get(origin, flow.request.path[len(PREFIX):])
+                flow.metadata["localIcon"] = True
+                if raw and flow.request.method == "GET":
+                    flow.metadata["iconInput"] = raw
+                return
+            if flow.request.headers.get("sec-fetch-dest") in ("document","iframe","frame"):
+                flow.request.headers["accept-encoding"] = "identity"
+            if (flow.request.headers.get("sec-fetch-dest") == "image" or
+                    flow.request.path.partition("?")[0].lower().endswith(IMAGE_EXTENSIONS)) and flow.request.method == "GET":
                 for key in ("if-none-match","if-modified-since","range","if-range"):
                     flow.request.headers.pop(key,None)
                 flow.request.headers["accept-encoding"] = "identity"
             flow.request.stream = True
 
+    async def request(self, flow):
+        if not flow.metadata.get("localIcon"): return
+        raw = flow.metadata.pop("iconInput", None)
+        flow.response = http.Response.make(404,b"",{"Cache-Control":"no-store"})
+        if not raw: return
+        timing = flow.metadata["timing"] = {}
+        flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
+        if not self.admission.reserve(flow.id, len(raw)):
+            if self.capture: self.journal.add(flow,"Blocked · image queue at capacity")
+            return
+        try:
+            settings, payload = self.settings()
+            flow.metadata["mask_settings"] = settings
+            async with asyncio.timeout(20):
+                masked = await self.analyze(raw,payload,timing)
+            flow.response = http.Response.make(200, masked or raw, {"Content-Type":"image/png","Cache-Control":"no-store","X-Content-Type-Options":"nosniff"})
+            self.counts["scanned"] += 1
+            if masked: self.counts["masked"] += 1
+            if self.capture: self.journal.add(flow,"Masked" if masked else "Clear",raw,masked)
+        except (ValueError,OSError,asyncio.IncompleteReadError,asyncio.TimeoutError) as exc:
+            self.counts["errors"] += 1
+            flow.metadata["failure"] = type(exc).__name__ + " · " + str(exc)[:180]
+            if self.capture: self.journal.add(flow,"Scan error",raw)
+        finally:
+            self.admission.release(flow.id)
+
     def responseheaders(self, flow):
         r = flow.response
         kind = r.headers.get("content-type", "").split(";")[0].strip().lower()
+        if flow.metadata.get("localIcon"): return
         destination = flow.request.headers.get("sec-fetch-dest", "")
         image_request = destination == "image"
         if self.allowed(flow.request) and (kind in ("text/html", "application/xhtml+xml") or
                 destination in ("document", "iframe", "frame")):
+            cache_controls = r.headers.get("cache-control","") + "," + flow.request.headers.get("cache-control","")
+            editable = (kind == "text/html" and flow.request.method == "GET" and r.status_code == 200
+                        and r.headers.get("content-encoding","identity").lower() == "identity"
+                        and "no-transform" not in cache_controls.lower() and "content-range" not in r.headers
+                        and not any(h in r.headers for h in ("digest","content-digest","repr-digest","signature"))
+                        and "'sha" not in r.headers.get("content-security-policy","").lower())
             # Separate policies intersect; retain the site's original security restrictions.
             r.headers.add("content-security-policy", "img-src http: https:")
             r.headers["cache-control"] = "private, no-store"
+            if editable:
+                for key in ("content-length","content-md5","etag","last-modified","accept-ranges"):
+                    r.headers.pop(key,None)
+                origin = f"{flow.request.scheme}://{flow.request.host.lower()}:{flow.request.port}"
+                r.stream = self.inline_icons.transform(origin)
+                return
         if "started" in flow.metadata:
             flow.metadata["headersAt"] = time.monotonic()
         path = flow.request.path.split("?", 1)[0].lower()
-        image_path = path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif",
-                                    ".bmp", ".tif", ".tiff", ".ico", ".svg", ".jxl", ".apng"))
+        image_path = path.endswith(IMAGE_EXTENSIONS)
         ambiguous = kind in ("", "application/octet-stream", "binary/octet-stream")
         candidate = kind.startswith("image/") or image_request or image_path
         if not self.allowed(flow.request) or flow.request.method == "HEAD" or not (candidate or ambiguous):
@@ -149,9 +218,9 @@ class Filter:
         reason = None
         if r.status_code != 200 or "content-range" in r.headers: reason = f"incomplete HTTP {r.status_code}"
         elif encoding not in ("identity","gzip","x-gzip","deflate"): reason = "encoding " + encoding
-        elif not length.isascii() or not length.isdecimal(): reason = "unknown size"
-        elif len(length.lstrip("0")) > 8 or int(length[-8:]) > LIMIT: reason = "over size limit"
-        elif not self.admission.reserve(flow.id, int(length[-8:])):
+        elif length and (not length.isascii() or not length.isdecimal()): reason = "invalid size"
+        elif len(length.lstrip("0")) > 8 or int(length[-8:] or 0) > LIMIT: reason = "over size limit"
+        elif not self.admission.reserve(flow.id, int(length[-8:]) if length else LIMIT):
             reason = "image queue at capacity"
         if reason:
             r.stream = lambda chunk: b""
@@ -163,6 +232,7 @@ class Filter:
             self.counts["blocked"] = self.counts.get("blocked",0)+1
             if self.capture: self.journal.add(flow,"Blocked · "+reason)
             return
+        flow.metadata["bufferBudget"] = int(length[-8:]) if length else LIMIT
         r.stream = False
         flow.metadata["scan"] = True
 
@@ -290,7 +360,10 @@ class Filter:
             flow.metadata["mask_settings"] = settings
             timing["prepareMS"] = round(1000 * (time.monotonic()-arrived))
             async with asyncio.timeout(20):
-                masked = await self.analyze(raw, payload, timing)
+                for representation in representations(raw):
+                    masked = await self.analyze(representation, payload, timing)
+                    if masked:
+                        break
         except (zlib.error, OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError) as exc:
             phase = timing.pop("activeStage", "prepare")
             timing["failedAfterMS"] = round(1000 * (time.monotonic()-arrived))
