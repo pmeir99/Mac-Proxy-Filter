@@ -48,7 +48,7 @@ final class Controller: ObservableObject {
                     if enable {
                         guard let probe else { throw NetworkSetup.failure("Select a destination outside the bypass list.") }
                         do { try NetworkSetup.checkHTTPS(host: probe) }
-                        catch {
+                        catch is NetworkSetup.CertificateRejected {
                             try NetworkSetup.trust(cert)
                             try NetworkSetup.checkHTTPS(host: probe)
                         }

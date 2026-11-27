@@ -63,6 +63,10 @@ enum NetworkSetup {
             }
             changed += 1
         }
+        if enable && configured == 0 {
+            throw failure("No network service could be configured. Check existing proxy settings on " +
+                          (skipped.isEmpty ? "this Mac" : skipped.joined(separator: ", ")) + ".")
+        }
         if changed > 0 {
             guard SCPreferencesCommitChanges(prefs), SCPreferencesApplyChanges(prefs) else {
                 throw failure("Network settings could not be applied. Retry setup or restore routing.")
@@ -75,6 +79,11 @@ enum NetworkSetup {
 
     // Prove that the selected hostname completes TLS through our listener using
     // native system trust. Do not follow redirects or send browser credentials.
+    struct CertificateRejected: LocalizedError {
+        let host: String
+        var errorDescription: String? { "macOS rejected the HTTPS certificate for " + host + "." }
+    }
+
     static func checkHTTPS(host: String) throws {
         let task = Process()
         let output = Pipe()
@@ -88,7 +97,7 @@ enum NetworkSetup {
         task.waitUntilExit()
         let response = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
         if task.terminationStatus == 60 {
-            throw failure("macOS rejected the HTTPS certificate for " + host + ". Keep browser warnings enabled. Restore previous routing if browsing is interrupted.")
+            throw CertificateRejected(host: host)
         }
         let codes = response.split(separator: " ")
         guard task.terminationStatus == 0, codes.count == 2, codes[0] == "200",

@@ -49,7 +49,7 @@ enum SemanticPeople {
         var buffer: CVPixelBuffer?
         guard CVPixelBufferCreate(nil,w,h,kCVPixelFormatType_OneComponent8,nil,&buffer)==kCVReturnSuccess,
               let buffer else { throw ScanFailure.unsupported }
-        CVPixelBufferLockBaseAddress(buffer, [])
+        guard CVPixelBufferLockBaseAddress(buffer, []) == kCVReturnSuccess else { throw ScanFailure.unsupported }
         guard let destination = CVPixelBufferGetBaseAddress(buffer) else {
             CVPixelBufferUnlockBaseAddress(buffer, [])
             throw ScanFailure.unsupported
@@ -104,7 +104,7 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
         guard let result = request.results?.first?.pixelBuffer else { throw ScanFailure.unsupported }
         buffer = result
     }
-    CVPixelBufferLockBaseAddress(buffer, .readOnly)
+    guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { throw ScanFailure.unsupported }
     defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
     guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw ScanFailure.unsupported }
     let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
