@@ -128,6 +128,14 @@ def verify_running_chrome(directory):
                         seen.add(name+" "+str(event["params"])[:350])
                 print("Proxy diagnostics:",sorted(seen)[:70],flush=True)
                 raise AssertionError("Running Chrome did not adopt the system PAC")
+            output("sudo","networksetup","-setautoproxystate",service,"off")
+            start=time.monotonic()
+            while time.monotonic()-start < 20:
+                if tab.goto(url+"?restored="+str(time.monotonic_ns())).body() == raw:
+                    print(f"Same Chrome tab resumed direct browsing after {time.monotonic()-start:.2f}s",flush=True)
+                    break
+                time.sleep(.2)
+            else: raise AssertionError("Running Chrome did not release the disabled PAC")
         finally:
             output("sudo","networksetup","-setautoproxystate",service,"off")
             browser.close()

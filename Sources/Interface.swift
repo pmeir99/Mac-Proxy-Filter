@@ -4,7 +4,7 @@ import ServiceManagement
 
 struct Interface: View {
     @ObservedObject var model: Controller
-    @AppStorage("maskStyle") var style = "Blur"
+    @AppStorage("maskStyle") var style = "Cover"
     @AppStorage("maskShape") var shape = "Silhouette"
     @AppStorage("maskStrength") var strength = 0.35
     @AppStorage("maskMargin") var margin = 0.0
@@ -43,7 +43,7 @@ struct Interface: View {
                 Section("Protection") {
                     LabeledContent("Proxy",value:model.status)
                     if !model.activity.isEmpty { Text(model.activity).font(.callout).textSelection(.enabled) }
-                    Button(model.active ? "Stop filtering" : "Enable filtering…") { model.active ? model.stop() : model.enableFromStopped() }.buttonStyle(.borderedProminent).disabled(model.settingUp)
+                    Button(model.active ? "Stop filtering" : "Enable filtering…") { if model.active { Task { _ = await model.disable() } } else { model.enableFromStopped() } }.buttonStyle(.borderedProminent).disabled(model.settingUp)
                     if !model.setupMessage.isEmpty { Text(model.setupMessage).foregroundStyle(.secondary) }
                 }
                 Section("Startup and background") {
@@ -59,8 +59,8 @@ struct Interface: View {
                     Text("Connect directly to these hosts"); TextEditor(text:$model.exceptions).frame(height:45)
                 }.disabled(model.active)
                 DisclosureGroup("Network setup") {
-                    Button("Check or repair setup…") { model.setup(enable:true) }.disabled(!model.active || model.settingUp)
-                    Button("Restore previous routing…") { model.setup(enable:false) }.disabled(model.settingUp)
+                    Button("Check or repair setup…") { model.repairRouting() }.disabled(!model.active || model.settingUp)
+                    Button("Restore previous routing…") { Task { _ = await model.disable() } }.disabled(model.settingUp)
                     Button("Show public certificate") { NSWorkspace.shared.activateFileViewerSelecting([model.certificate]) }
                 }
             }.tabItem { Label("Overview",systemImage:"shield") }
@@ -128,29 +128,32 @@ struct Interface: View {
                 }
                 HStack {
                     Toggle("Include retained images in ZIP",isOn:$exportImages).disabled(!captureImages)
-                    Button("Export filtered activity…") { export() }.disabled(!model.active || !capture || busy)
+                    Button("Export selected request…") {
+                        if let selection { export(ids:[selection]) }
+                    }.disabled(busy || !visible.contains { $0.id == selection })
+                    Button("Export filtered activity…") { export(ids:visible.map(\.id)) }.disabled(visible.isEmpty || busy)
                 }
                 Text(notice).font(.caption)
             }.padding().tabItem { Label("Activity",systemImage:"waveform.path.ecg") }
             Form { Section("Mac Proxy Filter") {
                 LabeledContent("Installed release",value:Bundle.main.object(forInfoDictionaryKey:"FilterRelease") as? String ?? "Development")
-                Button("Check GitHub for updates…") { update() }.disabled(busy)
+                Button("Check for Updates") { update() }.disabled(busy)
                 Text(notice).foregroundStyle(.secondary)
             } }.tabItem { Label("Updates",systemImage:"arrow.down.circle") }
         }.formStyle(.grouped).frame(minWidth:660,minHeight:530)
     }
-    func export() {
-        let panel = NSSavePanel(); panel.allowedContentTypes = [.zip]; panel.nameFieldStringValue = "Filter diagnostics.zip"
+    func export(ids:[String]) {
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.zip]; panel.nameFieldStringValue = ids.count == 1 ? "Filter request.zip" : "Filter diagnostics.zip"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         busy = true
         Task {
             defer { busy = false }
-            do { let bytes = try await model.diagnostics("export",images:captureImages && exportImages,ids:visible.map(\.id)); try bytes.write(to:url,options:.atomic); notice = "Saved "+url.lastPathComponent }
+            do { let bytes = try await model.diagnostics("export",images:captureImages && exportImages,ids:ids); try bytes.write(to:url,options:.atomic); notice = "Saved "+url.lastPathComponent }
             catch { notice = error.localizedDescription }
         }
     }
     func update() {
-        busy = true; notice = "Checking GitHub…"
+        busy = true; notice = "Checking for updates…"
         Task {
             defer { busy = false }
             do {
@@ -167,7 +170,22 @@ struct Interface: View {
                 let staging = installed.deletingLastPathComponent().appendingPathComponent(".filter-"+UUID().uuidString)
                 try FileManager.default.copyItem(at:fresh,to:staging)
                 p.arguments![1] = staging.path
-                try p.run(); UserDefaults.standard.set(model.active,forKey:"resumeAfterUpdate"); model.stop(); NSApp.terminate(nil)
+                let resume = model.active
+                if model.settingUp { try? FileManager.default.removeItem(at:staging); notice = "Finish network setup before updating."; return }
+                if resume {
+                    guard await model.disable(manual:false) else {
+                        try? FileManager.default.removeItem(at:staging)
+                        notice = model.setupMessage
+                        return
+                    }
+                }
+                do { try p.run() } catch {
+                    try? FileManager.default.removeItem(at:staging)
+                    if resume { model.enableFromStopped() }
+                    throw error
+                }
+                UserDefaults.standard.set(resume,forKey:"resumeAfterUpdate")
+                NSApp.terminate(nil)
             } catch { notice = error.localizedDescription }
         }
     }

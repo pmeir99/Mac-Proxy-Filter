@@ -39,6 +39,21 @@ class Journal:
         processing = dict(flow.metadata.get("timing", {}))
         if "headersAt" in flow.metadata:
             processing["waitHeadersMS"] = round(1000 * (flow.metadata["headersAt"] - flow.metadata["started"]))
+        # Epoch timestamps below are from mitmproxy. Connection phases may overlap
+        # the request and are recorded only when this request observed their setup.
+        begin = flow.request.timestamp_start
+        end = response.timestamp_start if response else None
+        sent = flow.request.timestamp_end
+        server = flow.server_conn
+        if begin is not None and end is not None and end >= begin:
+            if sent is not None and begin <= sent <= end:
+                processing["receiveRequestMS"] = round(1000 * (sent - begin))
+                processing["afterRequestToHeadersMS"] = round(1000 * (end - sent))
+            tcp, tls = server.timestamp_tcp_setup, server.timestamp_tls_setup
+            if server.timestamp_start is not None and tcp is not None and begin <= server.timestamp_start <= tcp <= end:
+                processing["connectMS"] = round(1000 * (tcp - server.timestamp_start))
+            if tcp is not None and tls is not None and begin <= tcp <= tls <= end:
+                processing["upstreamTLSMS"] = round(1000 * (tls - tcp))
         if "cacheHit" in processing: row["cacheHit"] = processing.pop("cacheHit")
         processing.pop("activeStage", None)
         row["processing"] = processing

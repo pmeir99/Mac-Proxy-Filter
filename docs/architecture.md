@@ -22,6 +22,8 @@ Stages are elapsed wall time rounded to milliseconds. Absent fields mean the sta
 | Field | Interval |
 | --- | --- |
 | waitHeadersMS, receiveBodyMS | Request start to origin response headers, then headers to the complete buffered image |
+| receiveRequestMS, afterRequestToHeadersMS | First request byte to completed request, then to first response header (when ordered timestamps exist). This includes uploads, network latency and origin work. |
+| connectMS, upstreamTLSMS | Upstream socket setup and TLS when newly established within this request. These intervals can overlap the intervals above. |
 | prepareMS, hashMS, queueMS | Decode HTTP content encoding, validate and snapshot settings, then hash input and wait for the serialized worker |
 | workerMS | Worker startup if needed, IPC, native processing and result transfer combined |
 | decodeMS, segmentationMS, maskBoundsMS, fallbackMS | Within worker time, prepare the oriented thumbnail, run the primary detector, inspect the mask, and optionally run rescue detectors |

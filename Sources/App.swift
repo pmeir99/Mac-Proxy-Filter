@@ -28,6 +28,7 @@ final class Controller: ObservableObject {
         }
         request.setValue("Bearer "+token,forHTTPHeaderField:"Authorization")
         let (data,response) = try await URLSession.shared.data(for:request)
+        if (response as? HTTPURLResponse)?.statusCode == 410 { throw NetworkSetup.failure("This request has expired from Activity.") }
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw NetworkSetup.failure("Diagnostics unavailable") }
         return data
     }
@@ -39,26 +40,24 @@ final class Controller: ObservableObject {
     @Published var setupMessage = ""
     @Published var settingUp = false
 
-    func setup(enable: Bool) {
+    func repairRouting() {
         guard !settingUp else { return }
         settingUp = true
         let hosts = text.split(whereSeparator: \.isNewline).map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }.filter { !$0.isEmpty }
         let bypass = Set(exceptions.components(separatedBy: .newlines).map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() })
         let probe = (allSites ? ["example.com","example.org"] : hosts).first { !bypass.contains($0) }
-        setupMessage = enable ? "Checking HTTPS and requesting any required approvals…" : "Restoring network routing…"
+        setupMessage = "Checking HTTPS and requesting any required approvals…"
         let cert = certificate
         Task {
             do {
                 setupMessage = try await Task.detached {
-                    if enable {
-                        guard let probe else { throw NetworkSetup.failure("Select a destination outside the bypass list.") }
-                        do { try NetworkSetup.checkHTTPS(host: probe) }
-                        catch is NetworkSetup.CertificateRejected {
-                            try NetworkSetup.trust(cert)
-                            try NetworkSetup.checkHTTPS(host: probe)
-                        }
+                    guard let probe else { throw NetworkSetup.failure("Select a destination outside the bypass list.") }
+                    do { try NetworkSetup.checkHTTPS(host: probe) }
+                    catch is NetworkSetup.CertificateRejected {
+                        try NetworkSetup.trust(cert)
+                        try NetworkSetup.checkHTTPS(host: probe)
                     }
-                    return try NetworkSetup.apply(enable: enable)
+                    return try NetworkSetup.apply(enable: true)
                 }.value
             } catch { setupMessage = error.localizedDescription }
             settingUp = false
@@ -74,7 +73,7 @@ final class Controller: ObservableObject {
             prefs.removeObject(forKey:"resumeAfterUpdate")
             enableFromStopped()
         } else if SMAppService.mainApp.status == .enabled && prefs.bool(forKey:"resumeProtection") {
-            start()
+            enableFromStopped()
         }
     }
 
@@ -200,20 +199,36 @@ final class Controller: ObservableObject {
                     if FileManager.default.fileExists(atPath: token.path) {
                         UserDefaults.standard.set(true,forKey:"resumeProtection")
                         self.status = "Listening on this Mac"
-                        if self.setupAfterStart { self.setupAfterStart = false; self.setup(enable: true) }
+                        if self.setupAfterStart { self.setupAfterStart = false; self.repairRouting() }
                         await self.observe(child)
                         return
                     }
                     try? await Task.sleep(nanoseconds: 100_000_000)
                 }
-                if self.process === child { self.stop(); self.status = "Proxy startup timed out." }
+                if self.process === child { self.status = "Proxy startup timed out. Stop filtering to restore network routing." }
             }
         } catch { status = error.localizedDescription }
     }
 
     func enableFromStopped() { setupAfterStart = true; start() }
 
-    func stop(manual: Bool = true) {
+    func disable(manual: Bool = true) async -> Bool {
+        guard !settingUp else { return false }
+        settingUp = true
+        defer { settingUp = false }
+        setupMessage = "Requesting administrator approval to restore network routing…"
+        do {
+            setupMessage = try await Task.detached {
+                let message = try NetworkSetup.apply(enable: false)
+                try NetworkSetup.awaitRestoredRouting()
+                return message
+            }.value
+        } catch {
+            setupMessage = error.localizedDescription
+            return false
+        }
+        // Allow browsers observing the system notification to release cached routes.
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
         if manual { UserDefaults.standard.set(false,forKey:"resumeProtection") }
         activity = ""
         events = []
@@ -223,10 +238,23 @@ final class Controller: ObservableObject {
         process = nil
         active = false
         status = "Stopped"
+        return true
     }
 }
 
+@MainActor
 final class WindowLifecycle: NSObject, NSApplicationDelegate {
+    weak var controller: Controller?
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let controller else { return .terminateNow }
+        if controller.settingUp { return .terminateCancel }
+        guard controller.active else { return .terminateNow }
+        Task {
+            let approved = await controller.disable(manual: false)
+            sender.reply(toApplicationShouldTerminate: approved)
+        }
+        return .terminateLater
+    }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
@@ -239,11 +267,10 @@ struct FilterApp: App {
     var body: some Scene {
         WindowGroup("Mac Proxy Filter", id:"main") {
             Interface(model:model)
-                .onAppear { model.launch() }
+                .onAppear { windowLifecycle.controller = model; model.launch() }
                 .onReceive(NotificationCenter.default.publisher(for:NSApplication.didBecomeActiveNotification)) { _ in
                     model.loginStatus = SMAppService.mainApp.status
                 }
-                .onReceive(NotificationCenter.default.publisher(for:NSApplication.willTerminateNotification)) { _ in model.stop(manual:false) }
         }.commands {
             CommandGroup(replacing:.appTermination) {
                 Button(backgroundMode ? "Continue in Background" : "Quit Mac Proxy Filter") {

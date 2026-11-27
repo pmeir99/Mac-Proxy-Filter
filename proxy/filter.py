@@ -24,7 +24,6 @@ from journal import Journal
 from policy import domains, pac, tls_pattern, host_pattern
 
 LIMIT = 8 * 1024 * 1024
-TYPES = {"image/jpeg", "image/png", "image/webp", "image/avif", "image/jpg", "image/pjpeg", "image/x-png", "image/gif", "image/bmp", "image/tiff", "image/heic", "image/heif", "image/x-icon", "image/vnd.microsoft.icon"}
 
 IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif",
                                     ".bmp", ".tif", ".tiff", ".ico", ".svg", ".jxl", ".apng")
@@ -96,6 +95,12 @@ class Filter:
                         if not isinstance(selection, list) or not all(isinstance(i,str) for i in selection):
                             raise ValueError("Invalid selection")
                         ids = set(selection)
+                    if ids and len(ids) == 1:
+                        self.journal.prune()
+                        if not any(row["id"] in ids for row, _, _ in self.journal.entries):
+                            writer.write(b"HTTP/1.1 410 Gone\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                            await writer.drain()
+                            return
                     body = self.journal.report(query.get("site",[""])[0],export,query.get("outcome",["All"])[0],query.get("images",["0"])[0]=="1",ids)
                     status = "200 OK"
                     mime = "application/zip" if export else "application/json"
@@ -169,6 +174,15 @@ class Filter:
         r = flow.response
         kind = r.headers.get("content-type", "").split(";")[0].strip().lower()
         if flow.metadata.get("localIcon"): return
+        if "started" in flow.metadata:
+            flow.metadata["headersAt"] = time.monotonic()
+        # Preflight decisions are carried in status and CORS headers. Serve no payload.
+        if flow.request.method == "OPTIONS" and "access-control-request-method" in flow.request.headers:
+            r.stream = lambda chunk: b""
+            for header in ("content-length", "content-encoding"):
+                r.headers.pop(header, None)
+            flow.metadata["passVerdict"] = f"CORS preflight HTTP {r.status_code}"
+            return
         destination = flow.request.headers.get("sec-fetch-dest", "")
         image_request = destination == "image"
         if self.allowed(flow.request) and not image_request and (kind in ("text/html", "application/xhtml+xml") or
@@ -188,10 +202,8 @@ class Filter:
                 origin = f"{flow.request.scheme}://{flow.request.host.lower()}:{flow.request.port}"
                 r.stream = self.inline_icons.transform(origin)
                 return
-        if "started" in flow.metadata:
-            flow.metadata["headersAt"] = time.monotonic()
         path = flow.request.path.split("?", 1)[0].lower()
-        image_path = path.endswith(IMAGE_EXTENSIONS)
+        image_path = flow.request.method == "GET" and path.endswith(IMAGE_EXTENSIONS)
         ambiguous = kind in ("", "application/octet-stream", "binary/octet-stream")
         candidate = kind.startswith("image/") or image_request or image_path
         if not self.allowed(flow.request) or flow.request.method == "HEAD" or not (candidate or ambiguous):
@@ -204,7 +216,7 @@ class Filter:
         restricted = "no-transform" in [v.strip().lower() for v in controls.split(",")]
         flow.metadata["origin"] = dict(status=r.status_code, mime=kind, encoding=encoding,
             declaredLength=length, noTransform=restricted, partial="content-range" in r.headers)
-        if r.status_code in (204, 205) or (r.status_code == 200 and length == "0"):
+        if r.status_code in (204, 205) or (length == "0" and 200 <= r.status_code < 300):
             r.stream = lambda chunk: b""
             flow.metadata["passVerdict"] = "Empty"
             return
@@ -216,7 +228,9 @@ class Filter:
             flow.metadata["passVerdict"] = f"Redirect HTTP {r.status_code}"
             return
         reason = None
-        if r.status_code != 200 or "content-range" in r.headers: reason = f"incomplete HTTP {r.status_code}"
+        acknowledgement = (flow.request.method in ("PUT","POST","PATCH","DELETE") and
+                           r.status_code in (200,201,202) and not image_request)
+        if (r.status_code != 200 and not acknowledgement) or "content-range" in r.headers: reason = f"incomplete HTTP {r.status_code}"
         elif encoding not in ("identity","gzip","x-gzip","deflate"): reason = "encoding " + encoding
         elif length and (not length.isascii() or not length.isdecimal()): reason = "invalid size"
         elif len(length.lstrip("0")) > 8 or int(length[-8:] or 0) > LIMIT: reason = "over size limit"
@@ -329,7 +343,11 @@ class Filter:
         arrived = time.monotonic()
         timing = flow.metadata["timing"] = {"receiveBodyMS": round(1000 * (arrived-flow.metadata["headersAt"]))}
         raw = origin_response.raw_content
-        if not raw or len(raw)>LIMIT:
+        if raw == b"":
+            flow.response = origin_response
+            if self.capture: self.journal.add(flow,"Empty")
+            return
+        if raw is None or len(raw)>LIMIT:
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
             if self.capture: self.journal.add(flow,"Blocked · empty or oversized body")
             return
@@ -347,6 +365,17 @@ class Filter:
                       raw[:4]==b"RIFF" and raw[8:12]==b"WEBP" or raw[4:8]==b"ftyp" and
                       any(brand in raw[8:64] for brand in (b"avif",b"heic",b"mif1")))
             if not raster and flow.metadata.get("ambiguous"):
+                if len(raw) <= 256 * 1024 and raw.lstrip()[:1] in (b"{", b"["):
+                    try:
+                        json.loads(raw)
+                    except (ValueError, RecursionError):
+                        pass
+                    else:
+                        origin_response.headers["content-type"] = "application/json"
+                        origin_response.headers["x-content-type-options"] = "nosniff"
+                        flow.response = origin_response
+                        if self.capture: self.journal.add(flow, "Pass-through")
+                        return
                 # Only release recognized non-image containers to a generic binary caller.
                 if raw.startswith((b"%PDF-", b"PK\x03\x04", b"\x00asm", b"wOFF", b"wOF2")):
                     flow.response = origin_response

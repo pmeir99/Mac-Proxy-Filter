@@ -36,6 +36,21 @@ with tempfile.TemporaryDirectory() as temp:
         def do_POST(self):
             self.do_GET()
 
+        def do_OPTIONS(self):
+            self.send_response(200)
+            self.send_header("Access-Control-Allow-Origin","https://example.test")
+            self.send_header("Access-Control-Allow-Methods","PUT")
+            self.end_headers()
+
+        def do_PUT(self):
+            import hashlib
+            body = self.rfile.read(int(self.headers["content-length"]))
+            self.send_response(201)
+            self.send_header("ETag", hashlib.sha256(body).hexdigest())
+            self.end_headers()
+            if self.path == "/upload-json.jpg":
+                self.wfile.write(b'{"stored":true}')
+
         def do_GET(self):
             if self.path == "/oversize-preview.png":
                 self.send_response(200)
@@ -146,6 +161,16 @@ with tempfile.TemporaryDirectory() as temp:
             "--proxy","http://127.0.0.1:17862","--noproxy","","https://origin.test:18243/coffee.png"],
             env={"PATH":"/usr/bin:/bin"}, capture_output=True)
         assert untrusted.returncode == 60, ("Untrusted test CA was not rejected", untrusted.returncode)
+        import hashlib
+        upload = (work/"portrait.png").read_bytes()
+        for path, expected in (("upload.jpg",b""),("upload-json.jpg",b'{"stored":true}')):
+            headers = state/"upload-headers"
+            result = subprocess.check_output(curl+["-D",str(headers),"-X","PUT","--data-binary","@-",
+                "-w","%{http_code}","https://origin.test:18243/"+path],input=upload)
+            assert result == expected+b"201" and hashlib.sha256(upload).hexdigest() in headers.read_text()
+        preflight = subprocess.check_output(curl+["-i","-X","OPTIONS","-H","Access-Control-Request-Method: PUT",
+            "https://origin.test:18243/upload.jpg"])
+        assert b" 200 " in preflight and b"access-control-allow-methods: put" in preflight.lower()
         for name in ["coffee.png","portrait.png","cutout.png"]:
             out=work/("out-"+name)
             started=time.perf_counter()
@@ -242,8 +267,26 @@ with tempfile.TemporaryDirectory() as temp:
         events=json.loads(subprocess.check_output(diagnostic+["http://127.0.0.1:17861/events"]))
         selected=[e["id"] for e in events if "portrait" in e["searchText"]][:2]
         assert selected
+        one = [selected[0]]
+        with ZipFile(BytesIO(subprocess.check_output(diagnostic+["--data-binary",json.dumps(one),export_url]))) as report:
+            assert [r["id"] for r in json.loads(report.read("manifest.json"))] == one
+        expired = subprocess.run(diagnostic+["--data-binary",'["missing"]',export_url],capture_output=True)
+        assert expired.returncode != 0
         with ZipFile(BytesIO(subprocess.check_output(diagnostic+["--data-binary", json.dumps(selected), export_url]))) as report:
             assert {r["id"] for r in json.loads(report.read("manifest.json"))} == set(selected)
+        if env.get("FILTER_ALL") == "1":
+            import statistics
+            samples = {"Blur": [], "Cover": []}
+            for run in range(6):
+                for style in (("Blur","Cover") if run % 2 == 0 else ("Cover","Blur")):
+                    # Distinct cache keys force the same portrait through the warm worker.
+                    settings.write_text(json.dumps({"FILTER_STYLE":style,"BENCHMARK_SAMPLE":str(run)}))
+                    subprocess.check_output(curl+["--fail","https://origin.test:18243/portrait.png"])
+                    row = json.loads(subprocess.check_output(diagnostic+["http://127.0.0.1:17861/events"]))[0]
+                    assert row["verdict"] == "Masked" and not row["cacheHit"]
+                    if run: samples[style].append(row["processing"]["renderEncodeMS"])
+            print("Warm portrait render and PNG median (ms):", {k:statistics.median(v) for k,v in samples.items()},flush=True)
+            settings.write_text("{}")
         compare(work, prefix_sent, finish_image)
         if env.get("FILTER_ALL") != "1" and os.getenv("GITHUB_ACTIONS") == "true": verify_running_chrome(work)
         stats=json.loads(subprocess.check_output(["curl","--noproxy","*","--silent","http://127.0.0.1:17861/status"]))

@@ -17,11 +17,49 @@ enum NetworkSetup {
         return value == url || value.hasPrefix(url + "?revision=")
     }
 
+    // A dedicated, unshared right prevents another app's recent admin approval
+    // from silently authorizing this operation. macOS owns the credential dialog.
+    private static func approveDisable(_ authorization: AuthorizationRef) throws {
+        try "com.pmeir99.mac-proxy-filter.disable".withCString { name in
+            var definition: CFDictionary?
+            if AuthorizationRightGet(name, &definition) != errAuthorizationSuccess {
+                let rule: [String: Any] = ["class": "user", "group": "admin",
+                    "authenticate-user": true, "shared": false, "timeout": 0,
+                    "allow-root": false]
+                guard AuthorizationRightSet(authorization, name, rule as CFDictionary,
+                    "Approve stopping Mac Proxy Filter" as CFString, nil, nil) == errAuthorizationSuccess else {
+                    throw failure("macOS could not register the administrator approval requirement.")
+                }
+            }
+            var item = AuthorizationItem(name: name, valueLength: 0, value: nil, flags: 0)
+            let result = withUnsafeMutablePointer(to: &item) { pointer in
+                var rights = AuthorizationRights(count: 1, items: pointer)
+                return AuthorizationCopyRights(authorization, &rights, nil, [.interactionAllowed, .extendRights], nil)
+            }
+            guard result == errAuthorizationSuccess else {
+                throw failure("Administrator approval was cancelled or denied. Routing was left in place.")
+            }
+        }
+    }
+
+    static func awaitRestoredRouting() throws {
+        // Wait for configd to publish the effective change before closing the listener.
+        for _ in 0..<100 {
+            if let proxies = SCDynamicStoreCopyProxies(nil) as? [String: Any],
+               !(proxies[enabled] as? Int == 1 && owns(proxies[address])) {
+                return
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        throw failure("macOS still reports the filter proxy. The listener is staying open. Retry Restore routing.")
+    }
+
     static func apply(enable: Bool) throws -> String {
         var authorization: AuthorizationRef?
         guard AuthorizationCreate(nil, nil, [], &authorization) == errAuthorizationSuccess,
               let authorization else { throw failure("macOS authorization was unavailable.") }
-        defer { AuthorizationFree(authorization, []) }
+        defer { AuthorizationFree(authorization, [.destroyRights]) }
+        if !enable { try approveDisable(authorization) }
         guard let prefs = SCPreferencesCreateWithAuthorization(nil, "Mac Proxy Filter" as CFString, nil, authorization),
               SCPreferencesLock(prefs, true) else { throw failure("Network settings are locked or approval was declined.") }
         defer { SCPreferencesUnlock(prefs) }
@@ -53,7 +91,10 @@ enum NetworkSetup {
                 config[address] = refreshed
                 configured += 1
             } else {
-                guard ours, let previous = config[marker] as? [String: Any] else { continue }
+                guard ours else { continue }
+                guard let previous = config[marker] as? [String: Any] else {
+                    throw failure("Previous routing information is missing. Review this network service in System Settings.")
+                }
                 config[enabled] = previous[enabled]
                 config[address] = previous[address]
                 config.removeValue(forKey: marker)

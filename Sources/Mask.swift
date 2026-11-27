@@ -195,21 +195,31 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
     threshold.setValue(mask, forKey: kCIInputImageKey)
     threshold.setValue(0.05, forKey: "inputThreshold")
     guard let binaryMask = threshold.outputImage else { throw ScanFailure.unsupported }
-    let strength = min(1,max(0.05,Double(env["FILTER_STRENGTH"] ?? "") ?? 0.35))
-    let blurred = photo.clampedToExtent().applyingGaussianBlur(sigma: max(2, min(150, rect.width * strength * 0.1))).cropped(to: rect)
-    let hex = UInt32(env["FILTER_COLOR"] ?? "222222",radix:16) ?? 0x222222
-    let fill = CIColor(red:CGFloat((hex>>16)&255)/255,green:CGFloat((hex>>8)&255)/255,blue:CGFloat(hex&255)/255)
-    let foreground = env["FILTER_STYLE"] == "Cover" ? CIImage(color:fill).cropped(to:rect) : blurred
+    let foreground: CIImage
+    if env["FILTER_STYLE"] == "Blur" {
+        let strength = min(1,max(0.05,Double(env["FILTER_STRENGTH"] ?? "") ?? 0.35))
+        let radius = max(2, min(150, rect.width * strength * 0.1))
+        foreground = photo.clampedToExtent().applyingGaussianBlur(sigma:radius).cropped(to:rect)
+    } else {
+        let hex = UInt32(env["FILTER_COLOR"] ?? "222222",radix:16) ?? 0x222222
+        let fill = CIColor(red:CGFloat((hex>>16)&255)/255,green:CGFloat((hex>>8)&255)/255,blue:CGFloat(hex&255)/255)
+        foreground = CIImage(color:fill).cropped(to:rect)
+    }
     let painted = foreground.applyingFilter("CIBlendWithMask", parameters: [
         kCIInputBackgroundImageKey: photo, kCIInputMaskImageKey: binaryMask
     ]).cropped(to: rect)
     // Compositing the blur can otherwise smear the alpha channel at cutout edges.
-    let opaqueColor = painted.applyingFilter("CIColorMatrix", parameters: [
-        "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
-        "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
-    ])
-    let shaped = opaqueColor.applyingFilter("CISourceInCompositing",
-        parameters: [kCIInputBackgroundImageKey: photo]).cropped(to: rect)
+    let shaped: CIImage
+    if CGImageSourceGetType(src) == UTType.jpeg.identifier as CFString {
+        shaped = painted
+    } else {
+        let opaqueColor = painted.applyingFilter("CIColorMatrix", parameters: [
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+            "inputBiasVector": CIVector(x: 0, y: 0, z: 0, w: 1)
+        ])
+        shaped = opaqueColor.applyingFilter("CISourceInCompositing",
+            parameters: [kCIInputBackgroundImageKey: photo]).cropped(to: rect)
+    }
     trace.next("renderEncode")
     guard let png = context.pngRepresentation(of: shaped, format: .RGBA8, colorSpace: rgb),
           png.count <= 32 * 1024 * 1024 else { throw ScanFailure.unsupported }
