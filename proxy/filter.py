@@ -112,11 +112,12 @@ class Filter:
         r = flow.response
         kind = r.headers.get("content-type", "").split(";")[0].strip().lower()
         image_request = flow.request.headers.get("sec-fetch-dest") == "image"
+        if "started" in flow.metadata:
+            flow.metadata["headersAt"] = time.monotonic()
         if not (self.allowed(flow.request) and flow.request.method == "GET" and
                 (kind.startswith("image/") or image_request)):
             r.stream = True
             return
-        flow.metadata["headersAt"] = time.monotonic()
         length = r.headers.get("content-length","")
         encoding = r.headers.get("content-encoding","identity").strip().lower()
         controls = ",".join([r.headers.get("cache-control",""), flow.request.headers.get("cache-control","")])
@@ -125,7 +126,7 @@ class Filter:
             declaredLength=length, noTransform=restricted, partial="content-range" in r.headers)
         if r.status_code in (204,205) or (r.status_code == 200 and length == "0") or (r.status_code != 304 and not 200<=r.status_code<300):
             r.stream = True
-            if self.capture: self.journal.add(flow, "Empty" if r.status_code in (204,205) or length=="0" else f"Upstream HTTP {r.status_code}")
+            flow.metadata["passVerdict"] = "Empty" if r.status_code in (204,205) or length=="0" else f"Upstream HTTP {r.status_code}"
             return
         reason = None
         if r.status_code != 200 or "content-range" in r.headers: reason = f"incomplete HTTP {r.status_code}"
@@ -168,11 +169,14 @@ class Filter:
                 self.cache.move_to_end(cached)
                 timing["cacheHit"] = True
                 return self.cache[cached]
+        timing["activeStage"] = "queue"
         async with self.lock:
+            timing["activeStage"] = "worker"
             timing["queueMS"] = round(1000 * (time.monotonic() - start))
             for cached in (clear_key, key):
                 if cached in self.cache:
                     self.cache.move_to_end(cached)
+                    timing.pop("activeStage", None)
                     timing["cacheHit"] = True
                     return self.cache[cached]
             timing["cacheHit"] = False
@@ -203,6 +207,7 @@ class Filter:
                 await self.worker.wait()
                 self.worker = None
                 raise
+            timing.pop("activeStage", None)
             timing["workerMS"] = round(1000 * (time.monotonic() - started_worker))
             self.cache[key if result else clear_key] = result
             self.cost += len(result)
@@ -212,6 +217,10 @@ class Filter:
 
     async def response(self, flow):
         if not flow.metadata.get("scan"):
+            if self.capture and "started" in flow.metadata and not flow.metadata.get("logged"):
+                status = flow.response.status_code
+                verdict = f"Upstream HTTP {status}" if status >= 400 else "Pass-through"
+                self.journal.add(flow, flow.metadata.get("passVerdict", verdict))
             return
         try:
             await self.finish_image(flow)
@@ -256,7 +265,9 @@ class Filter:
             async with asyncio.timeout(20):
                 masked = await self.analyze(raw, payload, timing)
         except (zlib.error, OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError) as exc:
-            flow.metadata["failure"] = f"{type(exc).__name__} · {str(exc)[:180]}"
+            phase = timing.pop("activeStage", "prepare")
+            timing["failedAfterMS"] = round(1000 * (time.monotonic()-arrived))
+            flow.metadata["failure"] = f"{phase} · {type(exc).__name__} · {str(exc)[:180]}"
             self.counts["errors"] += 1
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
             if self.capture: self.journal.add(flow,"Scan error",raw)

@@ -77,14 +77,14 @@ struct Interface: View {
                 }
             }.onChange(of:[style,shape,String(strength),String(margin),hex]) { _,_ in if model.active { model.saveMaskSettings() } }.tabItem { Label("Mask",systemImage:"person.crop.rectangle") }
             VStack(alignment:.leading,spacing:12) {
-                Toggle("Capture image diagnostics",isOn:$capture).disabled(model.active)
+                Toggle("Capture request activity",isOn:$capture).disabled(model.active)
                 Toggle("Retain before and after images",isOn:$captureImages).disabled(model.active || !capture)
                 Text("Choose capture options before starting. Records stay in memory for up to five minutes. Retained images can contain original unmasked content.").font(.caption)
                 Text(model.activity).font(.callout)
                 HStack {
                     TextField("Exact referring or image hostname",text:$site)
                     Picker("Decision",selection:$outcome) {
-                        ForEach(["All","Clear","Masked","Blocked","Error","Upstream"],id:\.self) { Text($0) }
+                        ForEach(["All","Clear","Masked","Blocked","Error","Upstream","Pass-through"],id:\.self) { Text($0) }
                     }
                 }
                 Table(visible, selection:$selection) {

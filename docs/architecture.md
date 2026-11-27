@@ -15,7 +15,7 @@ Audit a release by recording its Git tag and downloading the matching source. Th
 
 ## Interpreting Activity
 
-Total milliseconds run from proxy request headers to the recorded decision or transport error. A block at response headers ends there. Browser decoding, display, and client delivery after the decision are outside this interval. Non-image pass-through successes do not create image decisions.
+Total milliseconds run from proxy request headers to the recorded decision or transport error. A block at response headers ends there. Browser decoding, display, and client delivery after the decision are outside this interval. Completed pass-through requests are recorded while capture is enabled. Their total ends at the proxy response hook. Traffic sent directly by the PAC never reaches this logger. Byte counts refer to inspected image data; streamed pass-through bodies are not counted.
 
 Stages are elapsed wall time rounded to milliseconds. Absent fields mean the stage was skipped or did not finish. A cache hit can therefore have no worker time.
 

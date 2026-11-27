@@ -31,7 +31,7 @@ class Journal:
                    status=response.status_code if response else 0, elapsedMS=round((time.monotonic()-flow.metadata.get("started",time.monotonic()))*1000),
                    beforeBytes=len(before), afterBytes=len(after or before))
         outcome = ("Error" if "error" in verdict.lower() else "Blocked" if verdict.startswith("Blocked")
-                   else verdict if verdict in ("Masked","Clear") else "Upstream")
+                   else verdict if verdict in ("Masked","Clear","Pass-through") else "Upstream")
         row["outcome"] = outcome
         row["method"] = flow.request.method
         if "failure" in flow.metadata: row["failure"] = flow.metadata["failure"]
@@ -39,6 +39,7 @@ class Journal:
         if "headersAt" in flow.metadata:
             processing["waitHeadersMS"] = round(1000 * (flow.metadata["headersAt"] - flow.metadata["started"]))
         if "cacheHit" in processing: row["cacheHit"] = processing.pop("cacheHit")
+        processing.pop("activeStage", None)
         row["processing"] = processing
         if "origin" in flow.metadata:
             row["origin"] = flow.metadata["origin"]
