@@ -33,7 +33,19 @@ with tempfile.TemporaryDirectory() as temp:
     slow_image=BytesIO()
     Image.open(work/"portrait.png").convert("RGB").save(slow_image,format="JPEG",progressive=True)
     class Handler(SimpleHTTPRequestHandler):
+        def do_POST(self):
+            self.do_GET()
+
         def do_GET(self):
+            if self.path in ("/opaque-asset", "/error-image", "/redirect-image"):
+                data = (work/"portrait.png").read_bytes()
+                self.send_response({"/opaque-asset":200, "/error-image":404, "/redirect-image":302}[self.path])
+                self.send_header("Content-Type","application/octet-stream" if self.path=="/opaque-asset" else "image/png")
+                if self.path=="/redirect-image": self.send_header("Location","/portrait.png")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if self.path.startswith("/policy-"):
                 name=self.path.removeprefix("/policy-").split(".")[0]
                 if name=="empty":
@@ -101,6 +113,13 @@ with tempfile.TemporaryDirectory() as temp:
             return sum(r>245 and g<8 and abs(b-156)<8 for r,g,b in image.getdata())
         tight=covered("0")
         assert tight>10000 and covered("0.1")>tight, "Rectangle or configurable padding failed"
+        # On an opaque source each changed pixel must receive exactly the cover color.
+        frame = subprocess.check_output([env["FILTER_WORKER"]],input=len(source).to_bytes(4,"big")+source,
+            env=dict(env,FILTER_STYLE="Cover", FILTER_COLOR="FD019C", FILTER_SHAPE="Silhouette"))
+        covered_pixels = Image.open(BytesIO(frame[4:])).convert("RGB")
+        original_pixels = Image.open(BytesIO(source)).convert("RGB")
+        changed = [b for a,b in zip(original_pixels.getdata(), covered_pixels.getdata()) if a != b]
+        assert len(changed)>1000 and all(r>245 and g<8 and abs(b-156)<8 for r,g,b in changed), "Original detail mixed into the solid mask"
     proxy=subprocess.Popen([engine,"--quiet","--set","onboarding=false","--listen-host","127.0.0.1","-p","17862",
         "--set","connection_strategy=lazy","--set","confdir="+str(conf),
         "--set","ssl_verify_upstream_trusted_ca="+str(state/"cert"),
@@ -167,6 +186,12 @@ with tempfile.TemporaryDirectory() as temp:
             finally: finish_image.set()
             output,_=slow.communicate(timeout=20)
             assert output.startswith(b"\x89PNG") and slow.returncode==0
+        for method in ("GET","POST"):
+            output=subprocess.check_output(curl+["--fail","-X",method,"https://origin.test:18243/opaque-asset"])
+            assert output==(work/"out-portrait.png").read_bytes(), "Generic portrait escaped inspection"
+        for path, status in (("error-image",403),("redirect-image",302)):
+            output=subprocess.check_output(curl+["-w","%{http_code}","https://origin.test:18243/"+path])
+            assert output==str(status).encode(), "Origin image body escaped on "+path
         assert subprocess.check_output(curl+["https://origin.test:18243/unscanned.jpg","-w","%{http_code}"])==b"403"
         pac=subprocess.check_output(["curl","--silent","--noproxy","*","http://127.0.0.1:17861/proxy.pac?revision=test"])
         assert b"FindProxyForURL" in pac
@@ -197,7 +222,7 @@ with tempfile.TemporaryDirectory() as temp:
             assert rows and all(r["outcome"]=="Masked" and "before" not in r for r in rows)
             assert all(not name.startswith("images/") for name in report.namelist())
             assert any("segmentationMS" in r["processing"] for r in rows)
-        compare(work)
+        compare(work, prefix_sent, finish_image)
         if env.get("FILTER_ALL") != "1" and os.getenv("GITHUB_ACTIONS") == "true": verify_running_chrome(work)
         stats=json.loads(subprocess.check_output(["curl","--noproxy","*","--silent","http://127.0.0.1:17861/status"]))
         assert stats["scanned"] >= 3 and stats["masked"] >= 2, stats

@@ -114,19 +114,31 @@ class Filter:
         image_request = flow.request.headers.get("sec-fetch-dest") == "image"
         if "started" in flow.metadata:
             flow.metadata["headersAt"] = time.monotonic()
-        if not (self.allowed(flow.request) and flow.request.method == "GET" and
-                (kind.startswith("image/") or image_request)):
+        path = flow.request.path.split("?", 1)[0].lower()
+        image_path = path.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".heic", ".heif",
+                                    ".bmp", ".tif", ".tiff", ".ico", ".svg", ".jxl", ".apng"))
+        ambiguous = kind in ("", "application/octet-stream", "binary/octet-stream")
+        candidate = kind.startswith("image/") or image_request or image_path
+        if not self.allowed(flow.request) or flow.request.method == "HEAD" or not (candidate or ambiguous):
             r.stream = True
             return
+        flow.metadata["ambiguous"] = ambiguous and not candidate
         length = r.headers.get("content-length","")
         encoding = r.headers.get("content-encoding","identity").strip().lower()
         controls = ",".join([r.headers.get("cache-control",""), flow.request.headers.get("cache-control","")])
         restricted = "no-transform" in [v.strip().lower() for v in controls.split(",")]
         flow.metadata["origin"] = dict(status=r.status_code, mime=kind, encoding=encoding,
             declaredLength=length, noTransform=restricted, partial="content-range" in r.headers)
-        if r.status_code in (204,205) or (r.status_code == 200 and length == "0") or (r.status_code != 304 and not 200<=r.status_code<300):
-            r.stream = True
-            flow.metadata["passVerdict"] = "Empty" if r.status_code in (204,205) or length=="0" else f"Upstream HTTP {r.status_code}"
+        if r.status_code in (204, 205) or (r.status_code == 200 and length == "0"):
+            r.stream = lambda chunk: b""
+            flow.metadata["passVerdict"] = "Empty"
+            return
+        if r.status_code in (301, 302, 303, 307, 308) and "location" in r.headers:
+            # Keep navigation semantics, but drop any uninspected redirect body.
+            r.stream = lambda chunk: b""
+            for header in ("content-length", "content-encoding", "digest", "content-digest"):
+                r.headers.pop(header, None)
+            flow.metadata["passVerdict"] = f"Redirect HTTP {r.status_code}"
             return
         reason = None
         if r.status_code != 200 or "content-range" in r.headers: reason = f"incomplete HTTP {r.status_code}"
@@ -145,6 +157,7 @@ class Filter:
             self.counts["blocked"] = self.counts.get("blocked",0)+1
             if self.capture: self.journal.add(flow,"Blocked · "+reason)
             return
+        r.stream = False
         flow.metadata["scan"] = True
 
     def settings(self):
@@ -234,10 +247,12 @@ class Filter:
             self.journal.add(flow, "Transport error")
 
     async def finish_image(self, flow):
-        flow.response.headers["cache-control"] = "private, no-store"
+        origin_response = flow.response
+        flow.response = http.Response.make(403, b"", {"Cache-Control": "no-store"})
+        origin_response.headers["cache-control"] = "private, no-store"
         arrived = time.monotonic()
         timing = flow.metadata["timing"] = {"receiveBodyMS": round(1000 * (arrived-flow.metadata["headersAt"]))}
-        raw = flow.response.raw_content
+        raw = origin_response.raw_content
         if not raw or len(raw)>LIMIT:
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
             if self.capture: self.journal.add(flow,"Blocked · empty or oversized body")
@@ -255,6 +270,12 @@ class Filter:
                        b"II*\x00",b"MM\x00*",b"\x00\x00\x01\x00")) or
                       raw[:4]==b"RIFF" and raw[8:12]==b"WEBP" or raw[4:8]==b"ftyp" and
                       any(brand in raw[8:64] for brand in (b"avif",b"heic",b"mif1")))
+            if not raster and flow.metadata.get("ambiguous"):
+                # Only release recognized non-image containers to a generic binary caller.
+                if raw.startswith((b"%PDF-", b"PK\x03\x04", b"\x00asm", b"wOFF", b"wOF2")):
+                    flow.response = origin_response
+                    if self.capture: self.journal.add(flow, "Pass-through")
+                    return
             if not raster:
                 flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
                 if self.capture: self.journal.add(flow,"Blocked · unsupported payload")
@@ -281,12 +302,13 @@ class Filter:
         self.counts["scanned"] += 1
         if masked:
             self.counts["masked"] += 1
-            r = flow.response
+            r = origin_response
             for header in ("content-encoding","etag","last-modified","accept-ranges","digest","content-digest","repr-digest","content-md5"):
                 r.headers.pop(header, None)
             r.headers["content-type"] = "image/png"
             r.headers["cache-control"] = "private, no-store"
             r.content = masked
+        flow.response = origin_response
         if self.capture: self.journal.add(flow,"Masked" if masked else "Clear",raw,masked)
 
     def done(self):

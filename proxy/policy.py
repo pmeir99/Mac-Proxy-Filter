@@ -32,7 +32,7 @@ def pac(hosts, all_sites=False, excluded=()):
     return r"""function FindProxyForURL(url, host) {
   host = host.toLowerCase().replace(/\.$/, "");
   if (!/^https?:/i.test(url)) return "DIRECT";
-  return new RegExp(%s).test(host) ? "PROXY 127.0.0.1:17862; DIRECT" : "DIRECT";
+  return new RegExp(%s).test(host) ? "PROXY 127.0.0.1:17862" : "DIRECT";
 }""" % json.dumps(host_pattern(hosts, all_sites, excluded))
 
 def tls_pattern(hosts, all_sites=False, excluded=()):

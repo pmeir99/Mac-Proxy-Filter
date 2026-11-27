@@ -38,7 +38,7 @@ To uninstall, use **Overview → Network setup → Restore previous routing…**
 | A page fails or shows a certificate warning | Record the exact hostname and browser error, then use **Check or repair setup…**. Clients that pin certificates can reject a locally trusted proxy. Record whether the same page loads after restoring previous routing. |
 | A thumbnail is missing | With capture enabled, check the image decision and upstream HTTP status. A retailer error, a partial response, an unsupported image, and a person in a `no-transform` image call for different fixes. A referring hostname is available only when supplied by the client. |
 
-Coverage depends on the client following system routing. The PAC permits a direct connection if the local proxy is unavailable. Starting filtering cannot recall pixels already displayed or transfers already underway. Small or crowded subjects can be missed, and objects can be misidentified.
+Coverage depends on the client following system routing. Once loaded, the PAC offers only the local proxy for included destinations. A stopped listener can therefore interrupt those sites until routing is restored. Chrome can still use a direct connection if it cannot load the system PAC itself. A thumbnail, a low-resolution placeholder and the full image can have different sources and detection results. Inline HTML/CSS/SVG, script-generated pixels, embedded document content, service-worker stores and previously decoded images can reach the screen without a fresh image transfer. Starting filtering cannot recall pixels already displayed or transfers already underway. Small or crowded subjects can be missed, and objects can be misidentified.
 
 ## Verification and goals
 
@@ -53,3 +53,5 @@ On an Apple silicon Mac with the Xcode tools, run `bash build.sh`. The build dow
 For editing a photo you open yourself, see the [standalone image editor](https://github.com/pmeir99/Image-Filtration-V1).
 
 [Current architecture and diagnostic fields](docs/architecture.md) · [Engineering decisions and remaining validation](docs/engineering-review.md)
+
+The proxy buffers recognized image responses before deciding what to deliver. Unrecognized generic binary data, oversized or lengthless candidate bodies, and non-success image bodies can be withheld. Gaussian blur uses a binary coverage mask and one radius within a given image. The blurred colors still follow the source lighting. Solid cover provides a single color.

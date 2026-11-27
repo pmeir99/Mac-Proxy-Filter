@@ -17,7 +17,7 @@ img {width:100%;height:100%;object-fit:cover;display:block}
 <div class="tile"><img src="http://outside.test:18280/portrait.png"></div>
 <div class="tile"><img src="http://origin.test:18280/coffee.png"></div></main>"""
 
-def compare(directory):
+def compare(directory, prefix_sent, finish_image):
     (directory / "page.html").write_text(PAGE)
     with sync_playwright() as drivers:
         def capture(args):
@@ -34,6 +34,22 @@ def compare(directory):
                 browser.close()
 
         bounds, before = capture(["--no-proxy-server"])
+        prefix_sent.clear()
+        finish_image.clear()
+        browser = drivers.chromium.launch(channel="chrome", args=["--proxy-pac-url=http://127.0.0.1:17861/proxy.pac"])
+        try:
+            tab = browser.new_page()
+            tab.goto("http://outside.test:18280/page.html")
+            tab.evaluate("""() => { document.body.replaceChildren(); const image = new Image();
+                document.body.append(image); image.src = 'http://origin.test:18280/slow.jpg'; }""")
+            assert prefix_sent.wait(5), "Chrome never requested the progressive image"
+            tab.wait_for_timeout(400)
+            assert tab.locator("img").evaluate("img => img.naturalWidth === 0 && !img.complete")
+            finish_image.set()
+            tab.locator("img").evaluate("img => img.decode()")
+        finally:
+            finish_image.set()
+            browser.close()
         new_bounds, after = capture(["--proxy-pac-url=http://127.0.0.1:17861/proxy.pac"])
     if "FILTER_TEST_EVIDENCE" in os.environ:
         evidence = Path(os.environ["FILTER_TEST_EVIDENCE"])

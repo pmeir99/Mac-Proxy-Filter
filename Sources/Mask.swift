@@ -189,13 +189,19 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
     } else if margin > 0 {
         mask = mask.applyingFilter("CIMorphologyMaximum",parameters:["inputRadius":margin]).cropped(to:rect)
     }
+    // Apply the complete treatment wherever the resampled person matte has support.
+    // Gray matte values otherwise mix sharp source detail back into the Gaussian.
+    guard let threshold = CIFilter(name: "CIColorThreshold") else { throw ScanFailure.unsupported }
+    threshold.setValue(mask, forKey: kCIInputImageKey)
+    threshold.setValue(0.05, forKey: "inputThreshold")
+    guard let binaryMask = threshold.outputImage else { throw ScanFailure.unsupported }
     let strength = min(1,max(0.05,Double(env["FILTER_STRENGTH"] ?? "") ?? 0.35))
     let blurred = photo.clampedToExtent().applyingGaussianBlur(sigma: max(2, min(150, rect.width * strength * 0.1))).cropped(to: rect)
     let hex = UInt32(env["FILTER_COLOR"] ?? "222222",radix:16) ?? 0x222222
     let fill = CIColor(red:CGFloat((hex>>16)&255)/255,green:CGFloat((hex>>8)&255)/255,blue:CGFloat(hex&255)/255)
     let foreground = env["FILTER_STYLE"] == "Cover" ? CIImage(color:fill).cropped(to:rect) : blurred
     let painted = foreground.applyingFilter("CIBlendWithMask", parameters: [
-        kCIInputBackgroundImageKey: photo, kCIInputMaskImageKey: mask
+        kCIInputBackgroundImageKey: photo, kCIInputMaskImageKey: binaryMask
     ]).cropped(to: rect)
     // Compositing the blur can otherwise smear the alpha channel at cutout edges.
     let opaqueColor = painted.applyingFilter("CIColorMatrix", parameters: [
