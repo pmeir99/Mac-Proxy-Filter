@@ -18,7 +18,11 @@ def domains(values):
     return sorted(result)
 
 # All-sites mode applies to public-style DNS names. Local hosts and IP literals stay direct.
-PUBLIC = r"(?![a-z0-9.-]*\.(?:localhost|local|internal|home\.arpa)\.?$)(?:[a-z0-9-]+\.)+[a-z][a-z0-9-]*"
+DNS_LABEL = r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+LOCAL_SUFFIX = r"(?:localhost|local|internal|home\.arpa|localdomain)"
+PUBLIC = (r"(?=.{1,253}$)(?!(?:.*\.)?" + LOCAL_SUFFIX + r"$)(?:" + DNS_LABEL
+          + r"\.)+[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?")
+
 def host_pattern(hosts, all_sites=False, excluded=()):
     block = "|".join(re.escape(h) for h in domains(excluded))
     pattern = PUBLIC if all_sites else "|".join(re.escape(h) for h in domains(hosts)) or "(?!)"

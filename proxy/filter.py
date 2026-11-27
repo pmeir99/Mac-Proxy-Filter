@@ -16,6 +16,7 @@ from mitmproxy import ctx, http
 # Keep imports from creating files inside the signed app bundle.
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from admission import Admission
 from journal import Journal
 from policy import domains, pac, tls_pattern, host_pattern
 
@@ -32,7 +33,7 @@ class Filter:
         self.rule = re.compile(host_pattern(*self.scope))
         self.counts = {"requests": 0, "scanned": 0, "masked": 0, "errors": 0}
         self.cache = OrderedDict()
-        self.style = None
+        self.admission = Admission()
         self.cost = 0
         self.lock = asyncio.Lock()
         self.worker = None
@@ -128,7 +129,9 @@ class Filter:
         if r.status_code != 200 or "content-range" in r.headers: reason = f"incomplete HTTP {r.status_code}"
         elif encoding not in ("identity","gzip","x-gzip","deflate"): reason = "encoding " + encoding
         elif not length.isascii() or not length.isdecimal(): reason = "unknown size"
-        elif int(length)>LIMIT: reason = "over size limit"
+        elif len(length.lstrip("0")) > 8 or int(length[-8:]) > LIMIT: reason = "over size limit"
+        elif not self.admission.reserve(flow.id, int(length[-8:])):
+            reason = "image queue at capacity"
         if reason:
             r.stream = lambda chunk: b""
             r.status_code = 403
@@ -141,34 +144,37 @@ class Filter:
             return
         flow.metadata["scan"] = True
 
-    async def analyze(self, body):
-        key = hashlib.sha256(body).digest()
-        def settings():
-            path = os.getenv("FILTER_MASK_FILE")
-            return tuple(sorted(json.loads(Path(path).read_text()).items())) if path else ()
-        style = settings()
-        if self.style == style and key in self.cache:
-            self.cache.move_to_end(key)
-            return self.cache[key]
+    def settings(self):
+        path = os.getenv("FILTER_MASK_FILE")
+        settings = json.loads(Path(path).read_text()) if path else {}
+        if not isinstance(settings, dict) or not all(isinstance(v, str) for v in settings.values()):
+            raise ValueError("Invalid mask settings")
+        payload = json.dumps(settings, sort_keys=True, separators=(",", ":")).encode()
+        if len(payload) > 4096:
+            raise ValueError("Oversized mask settings")
+        return settings, payload
+
+    async def analyze(self, body, payload):
+        digest = hashlib.sha256(body).digest()
+        clear_key = (digest, None)
+        key = (digest, payload)
+        for cached in (clear_key, key):
+            if cached in self.cache:
+                self.cache.move_to_end(cached)
+                return self.cache[cached]
         async with self.lock:
-            style = settings()
-            if style != self.style:
-                if self.worker and self.worker.returncode is None:
-                    self.worker.terminate()
-                    await self.worker.wait()
-                self.worker = None
-                self.cache.clear()
-                self.cost = 0
-                self.style = style
-            if key in self.cache:
-                self.cache.move_to_end(key)
-                return self.cache[key]
+            for cached in (clear_key, key):
+                if cached in self.cache:
+                    self.cache.move_to_end(cached)
+                    return self.cache[cached]
             if self.worker is None or self.worker.returncode is not None:
                 self.worker = await asyncio.create_subprocess_exec(os.environ["FILTER_WORKER"],
-                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,env=dict(os.environ,**dict(style)))
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,env=dict(os.environ, FILTER_FRAMED_SETTINGS="1"))
             try:
                 async with asyncio.timeout(15):
-                    self.worker.stdin.write(struct.pack(">I", len(body))+body)
+                    self.worker.stdin.write(struct.pack(">I", len(payload)) + payload)
+                    self.worker.stdin.write(struct.pack(">I", len(body)))
+                    self.worker.stdin.write(body)
                     await self.worker.stdin.drain()
                     size, = struct.unpack(">I", await self.worker.stdout.readexactly(4))
                     if size == 0xffffffff:
@@ -182,7 +188,7 @@ class Filter:
                 await self.worker.wait()
                 self.worker = None
                 raise
-            self.cache[key] = result
+            self.cache[key if result else clear_key] = result
             self.cost += len(result)
             while self.cost > 32*1024*1024 or len(self.cache) > 256:
                 self.cost -= len(self.cache.popitem(last=False)[1])
@@ -191,6 +197,15 @@ class Filter:
     async def response(self, flow):
         if not flow.metadata.get("scan"):
             return
+        try:
+            await self.finish_image(flow)
+        finally:
+            self.admission.release(flow.id)
+
+    def error(self, flow):
+        self.admission.release(flow.id)
+
+    async def finish_image(self, flow):
         flow.response.headers["cache-control"] = "private, no-store"
         raw = flow.response.raw_content
         if not raw or len(raw)>LIMIT:
@@ -213,8 +228,10 @@ class Filter:
                 if self.capture: self.journal.add(flow,"Blocked · unsupported payload")
                 flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
                 return
-            masked = await self.analyze(raw)
-            flow.metadata["mask_settings"] = dict(self.style or ())
+            settings, payload = self.settings()
+            flow.metadata["mask_settings"] = settings
+            async with asyncio.timeout(20):
+                masked = await self.analyze(raw, payload)
         except (zlib.error, OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
             if self.capture: self.journal.add(flow,"Blocked: scan error",raw)
             self.counts["errors"] += 1

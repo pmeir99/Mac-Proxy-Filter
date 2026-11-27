@@ -178,6 +178,8 @@ final class Controller: ObservableObject {
                     guard let self, self.process === finished else { return }
                     self.active = false
                     self.process = nil
+                    self.activity = ""
+                    self.events = []
                     self.status = "Stopped. Check that ports 17861 and 17862 are available."
                     try? FileManager.default.removeItem(at: token)
                 }

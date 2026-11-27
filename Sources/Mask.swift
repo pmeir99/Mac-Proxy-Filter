@@ -79,7 +79,7 @@ enum SemanticPeople {
     }
 }
 
-func scan(_ bytes: Data) throws -> Data {
+func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
     guard let src = CGImageSourceCreateWithData(bytes as CFData, nil),
           CGImageSourceGetCount(src) == 1,
           let info = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any],
@@ -109,7 +109,7 @@ func scan(_ bytes: Data) throws -> Data {
     guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw ScanFailure.unsupported }
     let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
     var x0 = width, x1 = -1, y0 = height, y1 = -1
-    let rectangle = ProcessInfo.processInfo.environment["FILTER_SHAPE"] == "Rectangle"
+    let rectangle = env["FILTER_SHAPE"] == "Rectangle"
     rows: for y in 0..<height {
         let row = base.advanced(by: y * CVPixelBufferGetBytesPerRow(buffer)).assumingMemoryBound(to: UInt8.self)
         for x in 0..<width where row[x] >= 128 { if !rectangle { x1 = x; break rows }; x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y) }
@@ -156,7 +156,6 @@ func scan(_ bytes: Data) throws -> Data {
     var mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace:NSNull()])
         .transformed(by: CGAffineTransform(scaleX: rect.width/CGFloat(width), y: rect.height/CGFloat(height)))
         .transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
-    let env = ProcessInfo.processInfo.environment
     let margin = min(0.2,max(0,Double(env["FILTER_MARGIN"] ?? "") ?? 0)) * min(rect.width,rect.height)
     if let f = fallback {
         let box = CGRect(x:rect.minX+f.minX*rect.width,y:rect.minY+f.minY*rect.height,
@@ -190,12 +189,23 @@ func scan(_ bytes: Data) throws -> Data {
     return png
 }
 
-while let header = read(4) {
+let defaults = ProcessInfo.processInfo.environment
+while let first = read(4) {
+    var settings = defaults
+    var header = first
+    if defaults["FILTER_FRAMED_SETTINGS"] == "1" {
+        let length = first.reduce(0) { $0 * 256 + Int($1) }
+        guard (2...4096).contains(length), let payload = read(length),
+              let values = try? JSONDecoder().decode([String: String].self, from: payload),
+              let next = read(4) else { break }
+        settings = values
+        header = next
+    }
     let size = header.reduce(0) { $0 * 256 + Int($1) }
     guard size > 0, size <= 8 * 1024 * 1024, let bytes = read(size) else { break }
     autoreleasepool {
         let result: Data?
-        do { result = try scan(bytes) }
+        do { result = try scan(bytes, settings: settings) }
         catch {
             let error = error as NSError
             FileHandle.standardError.write(Data("Scan unavailable (\(error.domain) \(error.code))\n".utf8))

@@ -51,3 +51,5 @@ The immediate goal is reliable people-only masking on an M4 Mac with 16 GB of me
 On an Apple silicon Mac with the Xcode tools, run `bash build.sh`. The build downloads and verifies the pinned proxy bundle and Core ML model, then produces an ad-hoc-signed app in `dist/`. To run the routing and policy tests separately, use `python3 tests/policy_test.py` with Node.js installed. [Build script](build.sh) · [Verification workflow](.github/workflows/verify.yml)
 
 For editing a photo you open yourself, see the [standalone image editor](https://github.com/pmeir99/Image-Filtration-V1). The [ImageEditor directory](ImageEditor) documents the separate editor snapshot included in this tree.
+
+[Engineering decisions and remaining validation](docs/engineering-review.md)

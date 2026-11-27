@@ -29,7 +29,8 @@ class PolicyTest(unittest.TestCase):
     def test_all_sites(self):
         scope = ([], True, ["skip.example"])
         for host, active in [("shop.example", True), ("cdn.shop.example", True), ("skip.example", False),
-                             ("printer.local", False), ("localhost", False), ("127.0.0.1", False)]:
+                             ("home.arpa", False), ("localhost.localdomain", False), ("a-.example", False),
+                             ("-a.example", False), ("printer.local", False), ("localhost", False), ("127.0.0.1", False)]:
             js = pac(*scope) + f'\nconsole.log(FindProxyForURL("https://{host}/", "{host}"))'
             self.assertEqual(subprocess.check_output(["node","-e",js],text=True).startswith("PROXY"), active)
             self.assertEqual(bool(re.fullmatch(tls_pattern(*scope),host+":443")), active)
