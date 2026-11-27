@@ -50,7 +50,10 @@ class Icons:
                     continue
                 literal = data[start:end]
                 try:
-                    raw = base64.b64decode(literal, validate=True)
+                    # JavaScript string literals commonly escape Base64 padding.
+                    encoded = re.sub(rb"\\(?:x3[dD]|u003[dD])", b"=", literal)
+                    encoded = encoded.replace(b"\\/", b"/")
+                    raw = base64.b64decode(encoded, validate=True)
                     if raw[:16] != b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR":
                         raise ValueError()
                     w,h = struct.unpack(">II",raw[16:24])

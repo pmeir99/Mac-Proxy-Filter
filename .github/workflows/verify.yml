@@ -226,7 +226,7 @@ jobs:
           python-version: '3.13'
       - run: python -m pip install Pillow playwright
         if: steps.claim.outputs.winner == 'true'
-      - run: python tests/policy_test.py && python tests/admission_test.py && swiftc Sources/ActivityFilters.swift tests/activity_filters.swift -o "$RUNNER_TEMP/test-filters" && "$RUNNER_TEMP/test-filters" && bash build.sh
+      - run: python tests/policy_test.py && python tests/admission_test.py && python tests/icons_test.py && swiftc Sources/ActivityFilters.swift tests/activity_filters.swift -o "$RUNNER_TEMP/test-filters" && "$RUNNER_TEMP/test-filters" && bash build.sh
         env:
           RELEASE_NUMBER: ${{ inputs.release_number }}
         if: steps.claim.outputs.winner == 'true'
