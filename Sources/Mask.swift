@@ -79,7 +79,19 @@ enum SemanticPeople {
     }
 }
 
-func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
+final class ScanTimings {
+    private var started = ProcessInfo.processInfo.systemUptime
+    private(set) var phase = "decode"
+    private(set) var values = [String: Int]()
+    func next(_ name: String) {
+        let now = ProcessInfo.processInfo.systemUptime
+        values[phase + "MS"] = Int(((now - started) * 1000).rounded())
+        started = now
+        phase = name
+    }
+}
+
+func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) throws -> Data {
     guard let src = CGImageSourceCreateWithData(bytes as CFData, nil),
           CGImageSourceGetCount(src) == 1,
           let info = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any],
@@ -93,6 +105,7 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
             kCGImageSourceCreateThumbnailWithTransform:true,
             kCGImageSourceThumbnailMaxPixelSize:min(1024,max(w,h))
           ] as CFDictionary) else { throw ScanFailure.unsupported }
+    trace.next("segmentation")
     let buffer: CVPixelBuffer
     if max(w,h) <= 256 {
         buffer = try SemanticPeople.mask(thumb)
@@ -104,6 +117,7 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
         guard let result = request.results?.first?.pixelBuffer else { throw ScanFailure.unsupported }
         buffer = result
     }
+    trace.next("maskBounds")
     guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { throw ScanFailure.unsupported }
     defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
     guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw ScanFailure.unsupported }
@@ -116,6 +130,7 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
     }
     var fallback = [CGRect]()
     if x1 < 0 {
+        trace.next("fallback")
         // Rectangle detectors can still localize a face or person when the pixel classifier is empty.
         let factor = max(1, 512.0 / CGFloat(max(thumb.width,thumb.height)))
         let pw = max(1,Int(CGFloat(thumb.width)*factor)), ph = max(1,Int(CGFloat(thumb.height)*factor))
@@ -152,6 +167,7 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
         }
     }
     guard x1 >= 0 || !fallback.isEmpty else { return Data() }
+    trace.next("composeGraph")
     let rect = photo.extent
     var mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace:NSNull()])
         .transformed(by: CGAffineTransform(scaleX: rect.width/CGFloat(width), y: rect.height/CGFloat(height)))
@@ -188,6 +204,7 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
     ])
     let shaped = opaqueColor.applyingFilter("CISourceInCompositing",
         parameters: [kCIInputBackgroundImageKey: photo]).cropped(to: rect)
+    trace.next("renderEncode")
     guard let png = context.pngRepresentation(of: shaped, format: .RGBA8, colorSpace: rgb),
           png.count <= 32 * 1024 * 1024 else { throw ScanFailure.unsupported }
     return png
@@ -209,11 +226,23 @@ while let first = read(4) {
     guard size > 0, size <= 8 * 1024 * 1024, let bytes = read(size) else { break }
     autoreleasepool {
         let result: Data?
-        do { result = try scan(bytes, settings: settings) }
+        let trace = ScanTimings()
+        var failure: String?
+        do { result = try scan(bytes, settings: settings, trace: trace) }
         catch {
             let error = error as NSError
             FileHandle.standardError.write(Data("Scan unavailable (\(error.domain) \(error.code))\n".utf8))
+            failure = "\(trace.phase) · \(error.domain) (\(error.code))"
             result = nil
+        }
+        trace.next("finished")
+        if defaults["FILTER_WORKER_TIMINGS"] == "1" {
+            var meta: [String: Any] = ["stages": trace.values]
+            if let failure { meta["failure"] = failure }
+            let data = (try? JSONSerialization.data(withJSONObject: meta)) ?? Data("{}".utf8)
+            var length = UInt32(data.count).bigEndian
+            withUnsafeBytes(of: &length) { output.write(Data($0)) }
+            output.write(data)
         }
         var count = (result.map { UInt32($0.count) } ?? UInt32.max).bigEndian
         withUnsafeBytes(of: &count) { output.write(Data($0)) }

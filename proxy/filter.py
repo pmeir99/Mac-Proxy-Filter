@@ -26,7 +26,7 @@ TYPES = {"image/jpeg", "image/png", "image/webp", "image/avif", "image/jpg", "im
 class Filter:
     def __init__(self):
         self.hosts = set(domains(json.loads(os.environ["FILTER_DOMAINS"])))
-        self.journal = Journal()
+        self.journal = Journal(images=os.getenv("FILTER_CAPTURE_IMAGES") == "1")
         self.capture = os.getenv("FILTER_CAPTURE") == "1"
         self.token = os.getenv("FILTER_TOKEN","")
         self.scope = (self.hosts, os.environ.get("FILTER_ALL") == "1", json.loads(os.environ.get("FILTER_EXCLUDED","[]")))
@@ -77,7 +77,8 @@ class Filter:
                 authorized = self.token and any(hmac.compare_digest(line, b"Authorization: Bearer "+self.token.encode()) for line in headers.split(b"\r\n"))
                 if authorized and target.path in ("/events","/export"):
                     export = target.path == "/export"
-                    body = self.journal.report(parse_qs(target.query).get("site",[""])[0],export)
+                    query = parse_qs(target.query)
+                    body = self.journal.report(query.get("site",[""])[0],export,query.get("outcome",["All"])[0],query.get("images",["0"])[0]=="1")
                     status = "200 OK"
                     mime = "application/zip" if export else "application/json"
             writer.write((f"HTTP/1.1 {status}\r\nContent-Type: {mime}\r\n"
@@ -115,6 +116,7 @@ class Filter:
                 (kind.startswith("image/") or image_request)):
             r.stream = True
             return
+        flow.metadata["headersAt"] = time.monotonic()
         length = r.headers.get("content-length","")
         encoding = r.headers.get("content-encoding","identity").strip().lower()
         controls = ",".join([r.headers.get("cache-control",""), flow.request.headers.get("cache-control","")])
@@ -157,6 +159,8 @@ class Filter:
     async def analyze(self, body, payload, timing):
         start = time.monotonic()
         digest = hashlib.sha256(body).digest()
+        timing["hashMS"] = round(1000 * (time.monotonic() - start))
+        start = time.monotonic()
         clear_key = (digest, None)
         key = (digest, payload)
         for cached in (clear_key, key):
@@ -175,16 +179,21 @@ class Filter:
             started_worker = time.monotonic()
             if self.worker is None or self.worker.returncode is not None:
                 self.worker = await asyncio.create_subprocess_exec(os.environ["FILTER_WORKER"],
-                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,env=dict(os.environ, FILTER_FRAMED_SETTINGS="1"))
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,env=dict(os.environ, FILTER_FRAMED_SETTINGS="1", FILTER_WORKER_TIMINGS="1"))
             try:
                 async with asyncio.timeout(15):
                     self.worker.stdin.write(struct.pack(">I", len(payload)) + payload)
                     self.worker.stdin.write(struct.pack(">I", len(body)))
                     self.worker.stdin.write(body)
                     await self.worker.stdin.drain()
+                    meta_size, = struct.unpack(">I", await self.worker.stdout.readexactly(4))
+                    if meta_size > 4096:
+                        raise OSError("Invalid worker timing frame")
+                    meta = json.loads(await self.worker.stdout.readexactly(meta_size))
+                    timing.update(meta.get("stages", {}))
                     size, = struct.unpack(">I", await self.worker.stdout.readexactly(4))
                     if size == 0xffffffff:
-                        raise ValueError("Image could not be scanned")
+                        raise ValueError(meta.get("failure", "Image could not be scanned"))
                     if size > 32*1024*1024:
                         raise OSError("Invalid worker response")
                     result = await self.worker.stdout.readexactly(size)
@@ -211,12 +220,18 @@ class Filter:
 
     def error(self, flow):
         self.admission.release(flow.id)
+        if self.capture and "started" in flow.metadata and not flow.metadata.get("logged"):
+            flow.metadata["failure"] = str(flow.error.msg)[:240] if flow.error else "Connection ended"
+            self.journal.add(flow, "Transport error")
 
     async def finish_image(self, flow):
         flow.response.headers["cache-control"] = "private, no-store"
+        arrived = time.monotonic()
+        timing = flow.metadata["timing"] = {"receiveBodyMS": round(1000 * (arrived-flow.metadata["headersAt"]))}
         raw = flow.response.raw_content
         if not raw or len(raw)>LIMIT:
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
+            if self.capture: self.journal.add(flow,"Blocked · empty or oversized body")
             return
         origin = flow.metadata["origin"]
         try:
@@ -232,19 +247,19 @@ class Filter:
                       raw[:4]==b"RIFF" and raw[8:12]==b"WEBP" or raw[4:8]==b"ftyp" and
                       any(brand in raw[8:64] for brand in (b"avif",b"heic",b"mif1")))
             if not raster:
-                if self.capture: self.journal.add(flow,"Blocked · unsupported payload")
                 flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
+                if self.capture: self.journal.add(flow,"Blocked · unsupported payload")
                 return
             settings, payload = self.settings()
             flow.metadata["mask_settings"] = settings
-            timing = {"queueMS": 0, "workerMS": 0}
-            flow.metadata["timing"] = timing
+            timing["prepareMS"] = round(1000 * (time.monotonic()-arrived))
             async with asyncio.timeout(20):
                 masked = await self.analyze(raw, payload, timing)
-        except (zlib.error, OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
-            if self.capture: self.journal.add(flow,"Blocked: scan error",raw)
+        except (zlib.error, OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError) as exc:
+            flow.metadata["failure"] = f"{type(exc).__name__} · {str(exc)[:180]}"
             self.counts["errors"] += 1
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
+            if self.capture: self.journal.add(flow,"Scan error",raw)
             return
         if masked and origin["noTransform"]:
             flow.response = http.Response.make(403,b"",{"Cache-Control":"no-store"})
@@ -252,7 +267,6 @@ class Filter:
             self.counts["scanned"] += 1
             if self.capture: self.journal.add(flow,"Blocked · person in no-transform image",raw)
             return
-        if self.capture: self.journal.add(flow,"Masked" if masked else "Clear",raw,masked)
         self.counts["scanned"] += 1
         if masked:
             self.counts["masked"] += 1
@@ -262,6 +276,7 @@ class Filter:
             r.headers["content-type"] = "image/png"
             r.headers["cache-control"] = "private, no-store"
             r.content = masked
+        if self.capture: self.journal.add(flow,"Masked" if masked else "Clear",raw,masked)
 
     def done(self):
         if self.parent_watch:

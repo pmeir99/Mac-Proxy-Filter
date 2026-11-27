@@ -81,7 +81,7 @@ with tempfile.TemporaryDirectory() as temp:
     engine=bundle/"Contents/Helpers/mitmproxy.app/Contents/MacOS/mitmdump"
     settings=state/"mask.json"
     settings.write_text("{}")
-    env=dict(os.environ,FILTER_MASK_FILE=str(settings),FILTER_TOKEN="ci-test",FILTER_CAPTURE="1",PYTHONDONTWRITEBYTECODE="1",FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
+    env=dict(os.environ,FILTER_MASK_FILE=str(settings),FILTER_TOKEN="ci-test",FILTER_CAPTURE="1",FILTER_CAPTURE_IMAGES="1",PYTHONDONTWRITEBYTECODE="1",FILTER_DOMAINS=json.dumps(["origin.test"]),FILTER_READY=str(ready),
              FILTER_WORKER=str(executables/"MaskWorker"))
     env.update(PATH="/usr/bin:/bin:/usr/sbin:/sbin")
     env.pop("PYTHONHOME",None)
@@ -184,7 +184,7 @@ with tempfile.TemporaryDirectory() as temp:
         diagnostic=["curl","--fail","--silent","--noproxy","*","-H","Authorization: Bearer ci-test"]
         export_url="http://127.0.0.1:17861/export"
         assert subprocess.run(["curl","--fail","--silent","--noproxy","*",export_url],capture_output=True).returncode != 0
-        with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?site=origin.test"]))) as report:
+        with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?site=origin.test&images=1"]))) as report:
             rows=json.loads(report.read("manifest.json"))
             assert any(r["verdict"]=="Blocked · person in no-transform image" and r["origin"]["noTransform"] and
                        r["origin"]["status"]==200 and r["origin"]["mime"]=="image/png" and r["status"]==403 for r in rows)
@@ -192,6 +192,11 @@ with tempfile.TemporaryDirectory() as temp:
                        and report.read(r["before"])==(work/"portrait.png").read_bytes() for r in rows)
         with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?site=unrelated.test"]))) as report:
             assert json.loads(report.read("manifest.json"))==[]
+        with ZipFile(BytesIO(subprocess.check_output(diagnostic+[export_url+"?outcome=Masked"]))) as report:
+            rows=json.loads(report.read("manifest.json"))
+            assert rows and all(r["outcome"]=="Masked" and "before" not in r for r in rows)
+            assert all(not name.startswith("images/") for name in report.namelist())
+            assert any("segmentationMS" in r["processing"] for r in rows)
         compare(work)
         if env.get("FILTER_ALL") != "1" and os.getenv("GITHUB_ACTIONS") == "true": verify_running_chrome(work)
         stats=json.loads(subprocess.check_output(["curl","--noproxy","*","--silent","http://127.0.0.1:17861/status"]))

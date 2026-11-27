@@ -4,6 +4,12 @@ import ServiceManagement
 
 struct Event: Codable, Identifiable {
     let id, site, host, verdict, mime: String
+    struct Origin: Codable { let status: Int; let encoding, declaredLength: String; let noTransform, partial: Bool }
+    let origin: Origin?
+    let outcome, method: String
+    let failure: String?
+    let processing: [String:Int]
+    let cacheHit: Bool?
     let time: Double
     let elapsedMS, beforeBytes, afterBytes, status: Int
 }
@@ -17,10 +23,14 @@ struct Interface: View {
     @AppStorage("maskColor") var hex = "222222"
     @AppStorage("backgroundMode") var backgroundMode = false
     @AppStorage("capture") var capture = false
+    @AppStorage("captureImages") var captureImages = false
+    @State private var exportImages = false
+    @State private var outcome = "All"
+    @State private var selection: String?
     @State private var site = ""
     @State private var notice = ""
     @State private var busy = false
-    var visible: [Event] { model.events.filter { site.isEmpty || $0.host.lowercased() == site.lowercased() || $0.site.lowercased() == site.lowercased() } }
+    var visible: [Event] { model.events.filter { (outcome == "All" || $0.outcome == outcome) && (site.isEmpty || $0.host.lowercased() == site.lowercased() || $0.site.lowercased() == site.lowercased()) } }
     var body: some View {
         TabView {
             Form {
@@ -68,14 +78,40 @@ struct Interface: View {
             }.onChange(of:[style,shape,String(strength),String(margin),hex]) { _,_ in if model.active { model.saveMaskSettings() } }.tabItem { Label("Mask",systemImage:"person.crop.rectangle") }
             VStack(alignment:.leading,spacing:12) {
                 Toggle("Capture image diagnostics",isOn:$capture).disabled(model.active)
-                Text("Set before starting. Capture keeps original and displayed images locally for up to five minutes, within 64 MiB and 1,500 entries. Exported ZIPs include original unmasked images.").font(.callout).foregroundStyle(.secondary)
+                Toggle("Retain before and after images",isOn:$captureImages).disabled(model.active || !capture)
+                Text("Choose capture options before starting. Records stay in memory for up to five minutes. Retained images can contain original unmasked content.").font(.caption)
                 Text(model.activity).font(.callout)
-                HStack { TextField("Exact referring or image hostname",text:$site); Button("Export last 5 minutes…") { export() }.disabled(!model.active || !capture || busy) }
-                Table(visible) {
-                    TableColumn("Referring site") { Text($0.site.isEmpty ? "Unavailable" : $0.site) }
+                HStack {
+                    TextField("Exact referring or image hostname",text:$site)
+                    Picker("Decision",selection:$outcome) {
+                        ForEach(["All","Clear","Masked","Blocked","Error","Upstream"],id:\.self) { Text($0) }
+                    }
+                }
+                Table(visible, selection:$selection) {
                     TableColumn("Image host",value:\.host)
                     TableColumn("Decision",value:\.verdict)
-                    TableColumn("Time") { Text("\($0.elapsedMS) ms") }
+                    TableColumn("Total") { Text("\($0.elapsedMS) ms") }
+                }
+                if let event = visible.first(where: { $0.id == selection }) {
+                    ScrollView {
+                        VStack(alignment:.leading,spacing:4) {
+                            Text(Date(timeIntervalSince1970:event.time).formatted() + " · " + event.method + " · " + event.mime)
+                            Text("Referring host " + (event.site.isEmpty ? "unavailable" : event.site))
+                            Text("Response \(event.status) · input \(event.beforeBytes) bytes · output \(event.afterBytes) bytes")
+                            if let origin = event.origin {
+                                Text("Origin HTTP \(origin.status) · \(origin.encoding) · declared bytes " + (origin.declaredLength.isEmpty ? "unknown" : origin.declaredLength))
+                            }
+                            if let failure = event.failure { Text(failure).foregroundStyle(.red) }
+                            if let hit = event.cacheHit { Text(hit ? "Cached decision" : "Fresh scan") }
+                            ForEach(event.processing.keys.sorted(),id:\.self) { stage in
+                                Text(stage.replacingOccurrences(of:"MS",with:"") + " · " + String(event.processing[stage] ?? 0) + " ms")
+                            }
+                        }.frame(maxWidth:.infinity,alignment:.leading).textSelection(.enabled)
+                    }.frame(maxHeight:130)
+                }
+                HStack {
+                    Toggle("Include retained images in ZIP",isOn:$exportImages).disabled(!captureImages)
+                    Button("Export filtered activity…") { export() }.disabled(!model.active || !capture || busy)
                 }
                 Text(notice).font(.caption)
             }.padding().tabItem { Label("Activity",systemImage:"waveform.path.ecg") }
@@ -92,7 +128,7 @@ struct Interface: View {
         busy = true
         Task {
             defer { busy = false }
-            do { let bytes = try await model.diagnostics("export",site:site); try bytes.write(to:url,options:.atomic); notice = "Saved "+url.lastPathComponent }
+            do { let bytes = try await model.diagnostics("export",site:site,outcome:outcome,images:captureImages && exportImages); try bytes.write(to:url,options:.atomic); notice = "Saved "+url.lastPathComponent }
             catch { notice = error.localizedDescription }
         }
     }

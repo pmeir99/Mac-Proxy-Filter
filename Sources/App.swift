@@ -17,9 +17,9 @@ final class Controller: ObservableObject {
     @Published var activity = ""
     @Published var events = [Event]()
     private var token = ""
-    func diagnostics(_ path:String,site:String = "") async throws -> Data {
+    func diagnostics(_ path:String,site:String = "", outcome:String = "All", images:Bool = false) async throws -> Data {
         var components = URLComponents(string:"http://127.0.0.1:17861/"+path)!
-        components.queryItems = [URLQueryItem(name:"site",value:site)]
+        components.queryItems = [URLQueryItem(name:"site",value:site), URLQueryItem(name:"outcome",value:outcome), URLQueryItem(name:"images",value:images ? "1" : "0")]
         var request = URLRequest(url:components.url!)
         request.setValue("Bearer "+token,forHTTPHeaderField:"Authorization")
         let (data,response) = try await URLSession.shared.data(for:request)
@@ -158,6 +158,7 @@ final class Controller: ObservableObject {
             self.token = UUID().uuidString
             environment["FILTER_TOKEN"] = self.token
             let prefs = UserDefaults.standard
+            environment["FILTER_CAPTURE_IMAGES"] = prefs.bool(forKey:"captureImages") ? "1" : "0"
             environment["FILTER_CAPTURE"] = prefs.bool(forKey:"capture") ? "1" : "0"
             for (key,variable) in [("maskStyle","STYLE"),("maskShape","SHAPE"),("maskMargin","MARGIN"),("maskStrength","STRENGTH"),("maskColor","COLOR")] {
                 if let value = prefs.object(forKey:key) { environment["FILTER_"+variable] = String(describing:value) }
