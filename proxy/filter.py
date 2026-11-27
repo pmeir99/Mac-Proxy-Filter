@@ -171,8 +171,8 @@ class Filter:
         if flow.metadata.get("localIcon"): return
         destination = flow.request.headers.get("sec-fetch-dest", "")
         image_request = destination == "image"
-        if self.allowed(flow.request) and (kind in ("text/html", "application/xhtml+xml") or
-                destination in ("document", "iframe", "frame")):
+        if self.allowed(flow.request) and not image_request and (kind in ("text/html", "application/xhtml+xml") or
+                (kind != "application/pdf" and destination in ("document", "iframe", "frame"))):
             cache_controls = r.headers.get("cache-control","") + "," + flow.request.headers.get("cache-control","")
             editable = (kind == "text/html" and flow.request.method == "GET" and r.status_code == 200
                         and r.headers.get("content-encoding","identity").lower() == "identity"

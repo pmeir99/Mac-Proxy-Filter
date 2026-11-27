@@ -194,6 +194,11 @@ with tempfile.TemporaryDirectory() as temp:
             finally: finish_image.set()
             output,_=slow.communicate(timeout=20)
             assert output.startswith(b"\x89PNG") and slow.returncode==0
+        pdf = b"%PDF-1.7\n% preview transport fixture\n%%EOF"
+        (work/"document.pdf").write_bytes(pdf)
+        headers = work/"pdf-headers"
+        returned = subprocess.check_output(curl+["--fail","-D",str(headers),"-H","Sec-Fetch-Dest: iframe","https://origin.test:18243/document.pdf"])
+        assert returned == pdf and "content-security-policy" not in headers.read_text().lower()
         for method in ("GET","POST"):
             output=subprocess.check_output(curl+["--fail","-X",method,"https://origin.test:18243/opaque-asset"])
             assert output==(work/"out-portrait.png").read_bytes(), "Generic portrait escaped inspection"

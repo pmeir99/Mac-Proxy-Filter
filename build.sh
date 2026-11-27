@@ -29,7 +29,7 @@ echo "6c2c8cbe1c2d765f231408458b8c273976039ae04a05b112d748fc21cb3bfe95  $stage/D
 xcrun coremlcompiler compile "$stage/DeepLabV3FP16.mlmodel" "$app/Resources"
 export MACOSX_DEPLOYMENT_TARGET=14.0
 xcrun swiftc -O Sources/Mask.swift -o "$app/MacOS/MaskWorker"
-xcrun swiftc -O -parse-as-library Sources/App.swift Sources/NetworkSetup.swift Sources/Interface.swift Sources/Updates.swift -o "$app/MacOS/MacProxyFilter"
+xcrun swiftc -O -parse-as-library Sources/App.swift Sources/NetworkSetup.swift Sources/Interface.swift Sources/ActivityFilters.swift Sources/Updates.swift -o "$app/MacOS/MacProxyFilter"
 mkdir -p "$stage/Filter.iconset"
 for size in 16 32 128 256 512; do
   for scale in 1 2; do
