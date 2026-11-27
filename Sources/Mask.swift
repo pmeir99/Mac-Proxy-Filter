@@ -85,6 +85,7 @@ enum SemanticPeople {
 
 final class ScanTimings {
     private var started = ProcessInfo.processInfo.systemUptime
+    var debugAnchors: [[Double]]?
     var recognition: String?
     private(set) var phase = "decode"
     private(set) var values = [String: Int]()
@@ -105,7 +106,7 @@ func visionMatte(_ image: CGImage, quality: VNGeneratePersonSegmentationRequest.
     return buffer
 }
 
-func locatePeople(_ image: CGImage) throws -> [PersonAnchor] {
+func recognitionRaster(_ image: CGImage) throws -> CGImage {
     let factor = max(1, 512 / CGFloat(max(image.width,image.height)))
     let width = max(1, Int(CGFloat(image.width)*factor)), height = max(1, Int(CGFloat(image.height)*factor))
     guard let canvas = CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:0,
@@ -116,22 +117,32 @@ func locatePeople(_ image: CGImage) throws -> [PersonAnchor] {
     canvas.interpolationQuality = .high
     canvas.draw(image,in:extent)
     guard let opaque = canvas.makeImage() else { throw ScanFailure.unsupported }
-    let bodies = VNDetectHumanRectanglesRequest()
-    bodies.upperBodyOnly = false
-    let faces = VNDetectFaceRectanglesRequest()
+    return opaque
+}
+
+func objectPeople(_ image: CGImage) throws -> [PersonAnchor] {
     guard let objectDetector else { throw ScanFailure.unsupported }
     let objects = VNCoreMLRequest(model:objectDetector)
     objects.imageCropAndScaleOption = .scaleFit
-    try VNImageRequestHandler(cgImage:opaque,options:[:]).perform([bodies,faces,objects])
+    try VNImageRequestHandler(cgImage:image,options:[:]).perform([objects])
+    return (objects.results as? [VNRecognizedObjectObservation] ?? []).compactMap { object in
+        guard let label = object.labels.first, label.identifier == "person", label.confidence >= 0.35 else { return nil }
+        return PersonAnchor(box:object.boundingBox,isFace:false,objectScore:label.confidence)
+    }
+}
+
+func nativePeople(_ opaque: CGImage, paddedRetry: Bool) throws -> [PersonAnchor] {
+    let width = opaque.width, height = opaque.height
+    let extent = CGRect(x:0,y:0,width:width,height:height)
+    let bodies = VNDetectHumanRectanglesRequest()
+    bodies.upperBodyOnly = false
+    let faces = VNDetectFaceRectanglesRequest()
+    try VNImageRequestHandler(cgImage:opaque,options:[:]).perform([bodies,faces])
     var anchors = (bodies.results ?? []).filter { $0.confidence >= 0.60 }
         .map { PersonAnchor(box:$0.boundingBox,isFace:false) }
     anchors += (faces.results ?? []).filter { $0.confidence >= 0.72 }
         .map { PersonAnchor(box:$0.boundingBox,isFace:true) }
-    for object in objects.results as? [VNRecognizedObjectObservation] ?? [] {
-        guard let label = object.labels.first, label.identifier == "person", label.confidence >= 0.35 else { continue }
-        anchors.append(PersonAnchor(box:object.boundingBox,isFace:false))
-    }
-    if anchors.isEmpty && max(image.width,image.height) <= 96 {
+    if anchors.isEmpty && paddedRetry {
         let border = CGFloat(max(width,height))/4
         let frame = extent.insetBy(dx:-border,dy:-border)
         let framed = CIImage(cgImage:opaque).composited(over:CIImage(color:CIColor(red:0.5,green:0.5,blue:0.5))).cropped(to:frame)
@@ -151,6 +162,30 @@ func locatePeople(_ image: CGImage) throws -> [PersonAnchor] {
     return anchors
 }
 
+// Recheck overlapping neighborhoods for small faces hidden by larger people.
+// Duplicates from neighboring tiles do not consume the localized retry budget.
+func neighborhoodFaces(_ image: CGImage, known: [PersonAnchor]) throws -> [PersonAnchor] {
+    var found = [PersonAnchor]()
+    for y in [0.0, 0.4] {
+        for x in [0.0, 0.4] {
+            let frame = CGRect(x:x,y:y,width:0.6,height:0.6)
+            let pixels = PersonAnchor(box:frame,isFace:true).inPixels(image.width,image.height)
+            guard let crop = image.cropping(to:pixels) else { continue }
+            let faces = VNDetectFaceRectanglesRequest()
+            try VNImageRequestHandler(cgImage:try recognitionRaster(crop),options:[:]).perform([faces])
+            let actual = CGRect(x:pixels.minX/CGFloat(image.width),y:1-pixels.maxY/CGFloat(image.height),
+                                width:pixels.width/CGFloat(image.width),height:pixels.height/CGFloat(image.height))
+            for face in faces.results ?? [] where face.confidence >= 0.75 {
+                let anchor = PersonAnchor(box:face.boundingBox,isFace:true).mapped(to:actual)
+                if !(known+found).contains(where:{ $0.isFace && $0.box.contains(CGPoint(x:anchor.box.midX,y:anchor.box.midY)) }) {
+                    found.append(anchor)
+                }
+            }
+        }
+    }
+    return found
+}
+
 // Give a small or seated subject its own analysis scale. Candidates still need
 // person pixels inside the detected location. Geometry stays in source coordinates.
 func rescue(_ anchor: PersonAnchor, in image: CGImage) throws -> SelectedMatte? {
@@ -167,7 +202,7 @@ func rescue(_ anchor: PersonAnchor, in image: CGImage) throws -> SelectedMatte? 
                        width:crop.width/CGFloat(width), height:crop.height/CGFloat(height))
     let local = CGRect(x:(anchor.box.minX-frame.minX)/frame.width, y:(anchor.box.minY-frame.minY)/frame.height,
                        width:anchor.box.width/frame.width,height:anchor.box.height/frame.height)
-    var selection = try selectPeople(SemanticPeople.mask(cutout),anchors:[PersonAnchor(box:local,isFace:anchor.isFace)])
+    var selection = try selectPeople(SemanticPeople.mask(cutout),anchors:[PersonAnchor(box:local,isFace:anchor.isFace,objectScore:anchor.objectScore)])
     guard selection.image != nil else { return nil }
     selection.frame = frame
     selection.regions = selection.regions.map {
@@ -192,33 +227,64 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
             kCGImageSourceThumbnailMaxPixelSize:min(1024,max(w,h))
           ] as CFDictionary) else { throw ScanFailure.unsupported }
     trace.next("localization")
-    let anchors = try locatePeople(thumb)
-    guard !anchors.isEmpty else {
-        trace.recognition = "No face or body located"
-        return Data()
-    }
-    trace.next("segmentation")
     let small = max(w,h) <= 256
+    let raster = try recognitionRaster(thumb)
+    var anchors = try nativePeople(raster,paddedRetry:max(w,h)<=96)
+    trace.next("segmentation")
     let primary = small ? try SemanticPeople.mask(thumb) : try visionMatte(thumb)
     trace.next("confirmation")
-    let first = try selectPeople(primary, anchors:anchors)
+    var first = try selectPeople(primary,anchors:anchors)
+    var alternate: CVPixelBuffer?
+    if anchors.isEmpty && first.unconfirmedRegions == 0 {
+        // Two empty pixel proposals on a scene with no native localization can
+        // exit without loading the heavier object detector.
+        trace.next("fallback")
+        alternate = small ? try visionMatte(raster) : try SemanticPeople.mask(thumb)
+        let candidate = try selectPeople(alternate!,anchors:[])
+        if candidate.unconfirmedRegions == 0 {
+            trace.recognition = "No face, body or person matte found"
+            return Data()
+        }
+    }
+    if anchors.isEmpty || first.unconfirmedRegions > 0 || first.confirmed.count != anchors.count {
+        trace.next("objectDetection")
+        anchors += try objectPeople(raster)
+    }
+    if !anchors.isEmpty && small && (first.unconfirmedRegions > 0 || !anchors.contains(where:{ $0.isFace })) {
+        anchors += try neighborhoodFaces(thumb,known:anchors)
+    }
+    guard !anchors.isEmpty else {
+        trace.recognition = "Proposed pixels had no corresponding person detection"
+        return Data()
+    }
+    trace.next("spatialAgreement")
+    if first.confirmed.count != anchors.count || first.unconfirmedRegions > 0 {
+        first = try selectPeople(primary,anchors:anchors)
+    }
     var mattes = [first]
     let outstanding = anchors.indices.filter { !first.confirmed.contains($0) }.map { anchors[$0] }
     if !outstanding.isEmpty {
         // Rescue a missing person using a different segmenter. A detector box
         // alone never authorizes painting unclassified pixels inside that box.
         trace.next("fallback")
-        let alternate = small ? try visionMatte(thumb,quality:.accurate) : try SemanticPeople.mask(thumb)
-        let second = try selectPeople(alternate,anchors:outstanding)
+        if alternate == nil { alternate = small ? try visionMatte(raster,quality:.accurate) : try SemanticPeople.mask(thumb) }
+        let second = try selectPeople(alternate!,anchors:outstanding)
         mattes.append(second)
-        let remaining = outstanding.indices.filter { !second.confirmed.contains($0) }
+        let remaining = outstanding.indices.filter { !second.confirmed.contains($0) && (outstanding[$0].objectScore ?? 1) >= 0.7 }
+            .sorted { outstanding[$0].isFace && !outstanding[$1].isFace }
         for index in remaining.prefix(6) {
             if let recovered = try rescue(outstanding[index],in:thumb) { mattes.append(recovered) }
         }
     }
     let regions = mattes.reduce(0) { $0 + $1.regions.count }
     let faces = anchors.filter(\.isFace).count
-    trace.recognition = "\(regions) confirmed regions · \(anchors.count-faces) body and \(faces) face observations"
+    let objects = anchors.filter { $0.objectScore != nil }.count
+    trace.recognition = "\(regions) confirmed regions · \(anchors.count-faces-objects) Vision bodies, \(faces) faces, \(objects) object-model person detections"
+    if defaults["FILTER_TEST_OBSERVATIONS"] == "1" {
+        trace.debugAnchors = anchors.prefix(32).map { a in
+            [a.isFace ? 1 : 0,Double(a.objectScore ?? -1),a.box.minX,a.box.minY,a.box.width,a.box.height]
+        }
+    }
     guard regions > 0 else { return Data() }
     trace.next("composeGraph")
     let rect = photo.extent
@@ -306,6 +372,7 @@ while let first = read(4) {
         if defaults["FILTER_WORKER_TIMINGS"] == "1" {
             var meta: [String: Any] = ["stages": trace.values]
             if let failure { meta["failure"] = failure }
+            if let anchors = trace.debugAnchors { meta["anchors"] = anchors }
             if let recognition = trace.recognition { meta["recognition"] = recognition }
             let data = (try? JSONSerialization.data(withJSONObject: meta)) ?? Data("{}".utf8)
             var length = UInt32(data.count).bigEndian

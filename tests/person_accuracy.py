@@ -51,7 +51,7 @@ def read_frame(pipe):
 
 @contextmanager
 def worker_session(executable):
-    settings = dict(os.environ, FILTER_WORKER_TIMINGS="1", FILTER_FRAMED_SETTINGS="1")
+    settings = dict(os.environ, FILTER_WORKER_TIMINGS="1", FILTER_FRAMED_SETTINGS="1", FILTER_TEST_OBSERVATIONS="1")
     with subprocess.Popen([executable], env=settings, stdin=subprocess.PIPE, stdout=subprocess.PIPE) as proc:
         def scan(data, shape="Silhouette"):
             prefs = json.dumps(dict(FILTER_STYLE="Cover", FILTER_SHAPE=shape,
@@ -115,15 +115,17 @@ def product_suite(directory, fixtures, portrait, scan):
             matte, meta, _ = scan(thumb(raw,size) if size else raw)
             negative_count += 1
             if matte is not None:
-                errors.append(f"{name}@{size or 'source'} falsely masked {matte.getbbox()} stages {list(meta['stages'])}")
+                errors.append(f"{name}@{size or 'source'} falsely masked {matte.getbbox()} {meta.get('recognition')} anchors {meta.get('anchors')}")
     print(f"Empty-product inputs {negative_count}, false masks {len(errors)}",flush=True)
     for name, box in [("baby", (.342,.449,.38,.493)), ("walk",(.16,.22,.31,.38))]:
         raw = (directory/name).read_bytes()
         for size in (0,256):
             matte, meta, _ = scan(thumb(raw,size) if size else raw)
             fraction = coverage(matte,box)
+            if name == "walk" and coverage(matte,(.62,.35,.78,.56)) > 0.01:
+                errors.append(f"{name}@{size or 'source'} masked the adjacent stroller canopy")
             if fraction < 0.5:
-                errors.append(f"{name}@{size or 'source'} only covered {fraction:.0%} of marked face/torso patch ({meta.get('recognition')})")
+                errors.append(f"{name}@{size or 'source'} only covered {fraction:.0%} of marked face/torso patch ({meta.get('recognition')} anchors {meta.get('anchors')})")
     # A separate piece of merchandise between two portraits must survive even
     # when the person boxes are enlarged to rectangles.
     side = Image.open(portrait).convert("RGB").resize((256,256))
@@ -145,6 +147,7 @@ def product_suite(directory, fixtures, portrait, scan):
 def coco_suite(path, scan):
     counts = Counter()
     latency = []
+    detail = []
     with ZipFile(path) as archive:
         members = set(archive.namelist())
         for name in sorted(n for n in members if n.endswith(".jpg") and "/images/" in n and "/." not in n):
@@ -159,13 +162,31 @@ def coco_suite(path, scan):
                     coords = list(map(float,fields[1:]))
                     polygons.append([(x*w,y*h) for x,y in zip(coords[::2],coords[1::2])])
             for poly in polygons: ImageDraw.Draw(truth).polygon(poly,fill=255)
-            matte, _, ms = scan(raw)
+            matte, meta, ms = scan(raw)
             latency.append(ms)
             counts[("TP" if matte is not None else "FN") if polygons else ("FP" if matte is not None else "TN")] += 1
             counts["personPixels"] += truth.histogram()[255]
             if matte is not None:
                 counts["maskedPixels"] += matte.histogram()[255]
                 counts["correctPixels"] += ImageChops.multiply(truth,matte).histogram()[255]
+            annotated = truth.histogram()[255]
+            shaded = 0 if matte is None else matte.histogram()[255]
+            correct = 0 if matte is None else ImageChops.multiply(truth,matte).histogram()[255]
+            person_coverage = []
+            for poly in polygons:
+                instance = Image.new("L",(w,h))
+                ImageDraw.Draw(instance).polygon(poly,fill=255)
+                fraction = 0 if matte is None else ImageChops.multiply(instance,matte).histogram()[255]/max(1,instance.histogram()[255])
+                person_coverage.append(round(fraction,3))
+                counts["instances"] += 1
+                counts["halfCovered"] += fraction >= 0.5
+            detail.append(dict(image=Path(name).name, referencePixels=annotated, coveredPixels=shaded,
+                               correctPixels=correct, personCoverage=person_coverage,
+                               recognition=meta.get("recognition"), workerMS=round(ms,1)))
+    if output := os.getenv("FILTER_TEST_EVIDENCE"):
+        folder = Path(output)
+        folder.mkdir(parents=True,exist_ok=True)
+        (folder/"person-accuracy.json").write_text(json.dumps({"counts":dict(counts),"images":detail},indent=2))
     assert len(latency) == 128
     print("COCO128-seg",dict(counts),"pixel precision",round(counts["correctPixels"]/max(1,counts["maskedPixels"]),3),
           "pixel recall",round(counts["correctPixels"]/counts["personPixels"],3),

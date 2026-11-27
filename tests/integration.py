@@ -174,9 +174,12 @@ with tempfile.TemporaryDirectory() as temp:
         if os.getenv("GITHUB_ACTIONS") == "true":
             source = (Path(os.environ["RUNNER_TEMP"])/"person-fixtures"/"gallery-3840").read_bytes()
             (work/"gallery.webp").write_bytes(source)
+            style = "Blur" if env.get("FILTER_ALL") == "1" else "Cover"
+            settings.write_text(json.dumps({"FILTER_STYLE":style,"FILTER_COLOR":"4499FF"}))
             result = subprocess.check_output(curl+["--fail","-H","Sec-Fetch-Dest: image",
                                                   "https://origin.test:18243/gallery.webp"])
-            assert result == source, "Zoomed empty stroller was modified in transit"
+            assert result == source, f"Zoomed empty stroller was modified in transit ({style})"
+            settings.write_text("{}")
         for name in ["coffee.png","portrait.png","cutout.png"]:
             out=work/("out-"+name)
             started=time.perf_counter()

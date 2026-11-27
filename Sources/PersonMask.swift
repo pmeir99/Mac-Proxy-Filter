@@ -9,6 +9,13 @@ import Vision
 struct PersonAnchor {
     let box: CGRect
     let isFace: Bool
+    var objectScore: Float? = nil
+
+    func mapped(to frame: CGRect) -> PersonAnchor {
+        let dst = CGRect(x:frame.minX+box.minX*frame.width,y:frame.minY+box.minY*frame.height,
+                         width:box.width*frame.width,height:box.height*frame.height)
+        return PersonAnchor(box:dst,isFace:isFace,objectScore:objectScore)
+    }
 
     func inPixels(_ width: Int, _ height: Int) -> CGRect {
         CGRect(x: box.minX * CGFloat(width), y: (1 - box.maxY) * CGFloat(height),
@@ -20,6 +27,7 @@ struct PersonAnchor {
 struct SelectedMatte {
     var frame = CGRect(x:0,y:0,width:1,height:1)
     var image: CIImage?
+    var unconfirmedRegions = 0
     var confirmed = Set<Int>()
     var regions = [CGRect]()  // normalized, lower-left coordinates
 }
@@ -90,7 +98,12 @@ func selectPeople(_ buffer: CVPixelBuffer, anchors: [PersonAnchor]) throws -> Se
         var matched = [Int]()
         for (index,box) in boxes.enumerated() where !box.isEmpty && bounds.intersects(box) {
             let area = box.width * box.height
-            let required = max(3, Int(ceil(max(area * (anchors[index].isFace ? 0.16 : 0.025),
+            // A thin strip on the edge of an object detection cannot validate
+            // a full person. Faces and native body observations have their own geometry.
+            let isObject = anchors[index].objectScore != nil
+            let minimumFraction: CGFloat = isObject ? 0.14 : (anchors[index].isFace ? 0.16 : 0.025)
+            if isObject && bounds.intersection(box).height < box.height * 0.32 { continue }
+            let required = max(3, Int(ceil(max(area * minimumFraction,
                                       min(CGFloat(component.count),area) * 0.23))))
             let intersection = bounds.intersection(box)
             if intersection.width*intersection.height < CGFloat(required) { continue }
@@ -105,7 +118,7 @@ func selectPeople(_ buffer: CVPixelBuffer, anchors: [PersonAnchor]) throws -> Se
             }
             if hits >= required { matched.append(index) }
         }
-        guard !matched.isEmpty else { continue }
+        if matched.isEmpty { selected.unconfirmedRegions += 1; continue }
         let bodies = matched.filter { !anchors[$0].isFace }.map { boxes[$0] }
         let bodyWindows = bodies.map {
             Window($0.insetBy(dx: -0.15*$0.width, dy: -0.12*$0.height).integral)
