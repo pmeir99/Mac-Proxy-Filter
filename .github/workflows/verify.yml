@@ -252,6 +252,7 @@ jobs:
           url=https://raw.githubusercontent.com/scikit-image/scikit-image/e8a42ba85aaf5fd9322ef9ca51bc21063b22fcae/skimage/data
           curl -fsSL --retry 3 "$url/astronaut.png" -o "$RUNNER_TEMP/portrait.png"
           curl -fsSL --retry 3 "$url/coffee.png" -o "$RUNNER_TEMP/coffee.png"
+          python tests/person_accuracy.py "$FILTER_TEST_APP/Contents/MacOS/MaskWorker" "$RUNNER_TEMP/person-fixtures" "$RUNNER_TEMP/portrait.png"
           python tests/integration.py "$RUNNER_TEMP/portrait.png" "$RUNNER_TEMP/coffee.png"
           FILTER_ALL=1 python tests/integration.py "$RUNNER_TEMP/portrait.png" "$RUNNER_TEMP/coffee.png"
           python tests/retail_probe.py
