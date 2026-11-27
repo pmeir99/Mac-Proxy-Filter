@@ -18,6 +18,7 @@ struct PersonAnchor {
 }
 
 struct SelectedMatte {
+    var frame = CGRect(x:0,y:0,width:1,height:1)
     var image: CIImage?
     var confirmed = Set<Int>()
     var regions = [CGRect]()  // normalized, lower-left coordinates

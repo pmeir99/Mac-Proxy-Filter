@@ -120,10 +120,10 @@ def product_suite(directory, fixtures, portrait, scan):
     for name, box in [("baby", (.342,.449,.38,.493)), ("walk",(.16,.22,.31,.38))]:
         raw = (directory/name).read_bytes()
         for size in (0,256):
-            matte, _, _ = scan(thumb(raw,size) if size else raw)
+            matte, meta, _ = scan(thumb(raw,size) if size else raw)
             fraction = coverage(matte,box)
             if fraction < 0.5:
-                errors.append(f"{name}@{size or 'source'} only covered {fraction:.0%} of marked face/torso patch")
+                errors.append(f"{name}@{size or 'source'} only covered {fraction:.0%} of marked face/torso patch ({meta.get('recognition')})")
     # A separate piece of merchandise between two portraits must survive even
     # when the person boxes are enlarged to rectangles.
     side = Image.open(portrait).convert("RGB").resize((256,256))

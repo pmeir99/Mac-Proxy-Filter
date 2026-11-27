@@ -2,7 +2,7 @@
 
 Mac Proxy Filter is a local macOS proxy that masks people in website images. Use ordinary Chrome, choose which image hosts to filter, and set how much of each person to cover. The app inspects eligible images before it sends them to the browser. When it detects no person, it returns the original image. Recognition and masking run on your Mac.
 
-**Current status:** Development preview for Apple silicon, with a macOS 14 minimum deployment target. The ZIP includes the proxy engine, its Python runtime, and the thumbnail model. Setup requires macOS approval for HTTPS trust and network routing. No extension, account, Terminal installation, or model download is required. [Download a Mac Proxy Filter preview](https://github.com/pmeir99/Mac-Proxy-Filter/releases)
+**Current status:** Development preview for Apple silicon, with a macOS 14 minimum deployment target. The ZIP includes the proxy engine, its Python runtime, and the compiled recognition models. Setup requires macOS approval for HTTPS trust and network routing. No extension, account, Terminal installation, or model download is required. [Download a Mac Proxy Filter preview](https://github.com/pmeir99/Mac-Proxy-Filter/releases)
 
 ## Set up and verify filtering
 
@@ -17,14 +17,14 @@ Mac Proxy Filter is a local macOS proxy that masks people in website images. Use
 | --- | --- |
 | Route | A proxy auto-configuration (PAC) file sends selected destinations to the local proxy in browsers that honor macOS proxy settings. In all-sites mode, local names and literal IP addresses go direct. |
 | Inspect | The proxy verifies the upstream HTTPS certificate and holds eligible still-image responses for scanning. The current limits are 8 MiB for the image body and 12 megapixels for decoding. |
-| Detect | A resident Swift worker uses Apple Vision person segmentation for larger images. At 256 pixels or less on the longest side it uses the bundled DeepLabV3 FP16 Core ML model, and runs localized person or face detection when either model returns an empty mask. Repeated image content can reuse a cached result. |
+| Detect | The local worker locates bodies and faces with Vision and the person class from a bundled YOLOv3 Core ML detector. It checks those locations against connected person pixels from Vision segmentation or, for thumbnails, DeepLabV3. A second segmenter and bounded crop retries can recover a subject missed at the first scale. Repeated image content can reuse a cached result. |
 | Render | A clear result preserves the image bytes. A positive result normally returns a full-size PNG with a Core Image blur or solid cover. Chrome still owns the element, crop, border radius and overlays. For an image marked `no-transform`, a clear result passes through and an image requiring a mask is withheld. |
 | Handle failures | Recognized image requests with an unreadable or unsupported body, partial content, or a scan failure can be withheld. A missing thumbnail can therefore be a filtering decision even when the page loads. |
 
 ## App controls
 
 - **Overview** controls website scope, HTTPS setup, login startup, and menu-bar behavior. Closing the window keeps the worker running. Enable **Keep filtering in the menu bar when I press ⌘Q** if you want the Quit shortcut to do the same. Stop filtering before editing the host lists. Stop, Restore routing, and Quit while filtering request macOS administrator credentials. The app restores its saved network routes before shutting down its listener.
-- **Mask** offers solid cover by default or Gaussian blur with adjustable strength. **Follow people** uses the detected shape. **Enclosing rectangle** covers the region containing all detections. Add up to 20% of the shorter image dimension as extra margin. Changes apply to new image requests while filtering runs.
+- **Mask** offers solid cover by default or Gaussian blur with adjustable strength. **Follow people** uses the detected shape. **Enclosing rectangle** covers each confirmed region separately. Add up to 20% of the shorter image dimension as extra margin. Changes apply to new image requests while filtering runs.
 - **Activity** captures routed request outcomes for five minutes. Turn capture on before starting. Search recorded metadata or combine host, method, status, MIME, decision and total-duration filters, then select a row for origin and response status, failure details, and stage timings. **Export filtered activity…** uses both filters. Capture and export default to metadata only. To share pixels, enable **Retain before and after images** before starting and **Include retained images in ZIP** before exporting. Retention is limited to 1,500 entries and 64 MiB of image payloads.
 - **Updates** checks this repository on demand and offers **Download and install** when a newer proxy build is available.
 
@@ -63,3 +63,5 @@ Activity search matches partial text across recorded fields, including the reque
 Unknown-length candidate images reserve the full 8 MiB input allowance. Multi-resolution icons are inspected before release. For eligible identity-encoded HTML, small quoted inline PNGs up to 64 pixels per side are replaced with temporary same-origin URLs served by the local filter. CSP still blocks other data and blob images. Signed, compressed or no-transform documents can retain blank inline icons.
 
 In Activity, select a row and choose **Export selected request…** for a one-request ZIP. Enable image retention before capture and opt into including images when exporting if you need them. **Updates → Check for Updates** looks for the latest build.
+
+The packaged-worker accuracy check exercises the Doona zoom image, empty merchandise at thumbnail and gallery sizes, occupied strollers and a product between two people. It also reports image decisions and person-pixel coverage on the annotated COCO128-seg sample. Read the test sources and interpretation in [the architecture notes](docs/architecture.md#recognition-regressions).

@@ -21,16 +21,20 @@ func read(_ count: Int) -> Data? {
     return data
 }
 
+func bundledModel(_ name: String) -> VNCoreMLModel? {
+    let resources = URL(fileURLWithPath:CommandLine.arguments[0]).deletingLastPathComponent()
+        .deletingLastPathComponent().appendingPathComponent("Resources")
+    let configuration = MLModelConfiguration()
+    configuration.computeUnits = .all
+    guard let compiled = try? MLModel(contentsOf:resources.appendingPathComponent(name+".mlmodelc"),
+                                      configuration:configuration) else { return nil }
+    return try? VNCoreMLModel(for:compiled)
+}
+
+let objectDetector = bundledModel("YOLOv3Int8LUT")
+
 enum SemanticPeople {
-    private static let model: VNCoreMLModel? = {
-        let resources = URL(fileURLWithPath: CommandLine.arguments[0])
-            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources")
-        let configuration = MLModelConfiguration()
-        configuration.computeUnits = .all
-        guard let compiled = try? MLModel(contentsOf: resources.appendingPathComponent("DeepLabV3FP16.mlmodelc"),
-                                          configuration: configuration) else { return nil }
-        return try? VNCoreMLModel(for: compiled)
-    }()
+    private static let model = bundledModel("DeepLabV3FP16")
 
     static func mask(_ image: CGImage) throws -> CVPixelBuffer {
         guard let model else { throw ScanFailure.unsupported }
@@ -81,6 +85,7 @@ enum SemanticPeople {
 
 final class ScanTimings {
     private var started = ProcessInfo.processInfo.systemUptime
+    var recognition: String?
     private(set) var phase = "decode"
     private(set) var values = [String: Int]()
     func next(_ name: String) {
@@ -114,11 +119,18 @@ func locatePeople(_ image: CGImage) throws -> [PersonAnchor] {
     let bodies = VNDetectHumanRectanglesRequest()
     bodies.upperBodyOnly = false
     let faces = VNDetectFaceRectanglesRequest()
-    try VNImageRequestHandler(cgImage:opaque,options:[:]).perform([bodies,faces])
+    guard let objectDetector else { throw ScanFailure.unsupported }
+    let objects = VNCoreMLRequest(model:objectDetector)
+    objects.imageCropAndScaleOption = .scaleFit
+    try VNImageRequestHandler(cgImage:opaque,options:[:]).perform([bodies,faces,objects])
     var anchors = (bodies.results ?? []).filter { $0.confidence >= 0.60 }
         .map { PersonAnchor(box:$0.boundingBox,isFace:false) }
     anchors += (faces.results ?? []).filter { $0.confidence >= 0.72 }
         .map { PersonAnchor(box:$0.boundingBox,isFace:true) }
+    for object in objects.results as? [VNRecognizedObjectObservation] ?? [] {
+        guard let label = object.labels.first, label.identifier == "person", label.confidence >= 0.35 else { continue }
+        anchors.append(PersonAnchor(box:object.boundingBox,isFace:false))
+    }
     if anchors.isEmpty && max(image.width,image.height) <= 96 {
         let border = CGFloat(max(width,height))/4
         let frame = extent.insetBy(dx:-border,dy:-border)
@@ -139,6 +151,32 @@ func locatePeople(_ image: CGImage) throws -> [PersonAnchor] {
     return anchors
 }
 
+// Give a small or seated subject its own analysis scale. Candidates still need
+// person pixels inside the detected location. Geometry stays in source coordinates.
+func rescue(_ anchor: PersonAnchor, in image: CGImage) throws -> SelectedMatte? {
+    let width = image.width, height = image.height
+    let box = anchor.inPixels(width,height)
+    guard !box.isEmpty else { return nil }
+    let extraX = box.width * (anchor.isFace ? 0.8 : 0.16)
+    let extraY = box.height * (anchor.isFace ? 0.7 : 0.16)
+    var crop = box.insetBy(dx:-extraX,dy:-extraY)
+    if anchor.isFace { crop.size.height += 2*box.height }
+    crop = crop.integral.intersection(CGRect(x:0,y:0,width:width,height:height))
+    guard crop.width >= 3, crop.height >= 3, let cutout = image.cropping(to:crop) else { return nil }
+    let frame = CGRect(x:crop.minX/CGFloat(width), y:1-crop.maxY/CGFloat(height),
+                       width:crop.width/CGFloat(width), height:crop.height/CGFloat(height))
+    let local = CGRect(x:(anchor.box.minX-frame.minX)/frame.width, y:(anchor.box.minY-frame.minY)/frame.height,
+                       width:anchor.box.width/frame.width,height:anchor.box.height/frame.height)
+    var selection = try selectPeople(SemanticPeople.mask(cutout),anchors:[PersonAnchor(box:local,isFace:anchor.isFace)])
+    guard selection.image != nil else { return nil }
+    selection.frame = frame
+    selection.regions = selection.regions.map {
+        CGRect(x:frame.minX+$0.minX*frame.width,y:frame.minY+$0.minY*frame.height,
+               width:$0.width*frame.width,height:$0.height*frame.height)
+    }
+    return selection
+}
+
 func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) throws -> Data {
     guard let src = CGImageSourceCreateWithData(bytes as CFData, nil),
           CGImageSourceGetCount(src) == 1,
@@ -155,7 +193,10 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
           ] as CFDictionary) else { throw ScanFailure.unsupported }
     trace.next("localization")
     let anchors = try locatePeople(thumb)
-    guard !anchors.isEmpty else { return Data() }
+    guard !anchors.isEmpty else {
+        trace.recognition = "No face or body located"
+        return Data()
+    }
     trace.next("segmentation")
     let small = max(w,h) <= 256
     let primary = small ? try SemanticPeople.mask(thumb) : try visionMatte(thumb)
@@ -168,9 +209,17 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
         // alone never authorizes painting unclassified pixels inside that box.
         trace.next("fallback")
         let alternate = small ? try visionMatte(thumb,quality:.accurate) : try SemanticPeople.mask(thumb)
-        mattes.append(try selectPeople(alternate,anchors:outstanding))
+        let second = try selectPeople(alternate,anchors:outstanding)
+        mattes.append(second)
+        let remaining = outstanding.indices.filter { !second.confirmed.contains($0) }
+        for index in remaining.prefix(6) {
+            if let recovered = try rescue(outstanding[index],in:thumb) { mattes.append(recovered) }
+        }
     }
-    guard mattes.contains(where:{ $0.image != nil }) else { return Data() }
+    let regions = mattes.reduce(0) { $0 + $1.regions.count }
+    let faces = anchors.filter(\.isFace).count
+    trace.recognition = "\(regions) confirmed regions · \(anchors.count-faces) body and \(faces) face observations"
+    guard regions > 0 else { return Data() }
     trace.next("composeGraph")
     let rect = photo.extent
     let margin = min(0.2,max(0,Double(env["FILTER_MARGIN"] ?? "") ?? 0)) * min(rect.width,rect.height)
@@ -182,10 +231,13 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
             mask = CIImage(color:.white).cropped(to:box).composited(over:mask).cropped(to:rect)
         }
     } else {
-        for matte in mattes.compactMap(\.image) {
-            let aligned = matte.transformed(by:CGAffineTransform(scaleX:rect.width/matte.extent.width,
-                                                                    y:rect.height/matte.extent.height))
-                .transformed(by:CGAffineTransform(translationX:rect.minX,y:rect.minY))
+        for selection in mattes {
+            guard let matte = selection.image else { continue }
+            let frame = selection.frame
+            let aligned = matte.transformed(by:CGAffineTransform(scaleX:rect.width*frame.width/matte.extent.width,
+                                                                  y:rect.height*frame.height/matte.extent.height))
+                .transformed(by:CGAffineTransform(translationX:rect.minX+frame.minX*rect.width,
+                                                  y:rect.minY+frame.minY*rect.height))
             mask = aligned.applyingFilter("CIMaximumCompositing",parameters:[kCIInputBackgroundImageKey:mask]).cropped(to:rect)
         }
         if margin > 0 { mask = mask.applyingFilter("CIMorphologyMaximum",parameters:["inputRadius":margin]).cropped(to:rect) }
@@ -254,6 +306,7 @@ while let first = read(4) {
         if defaults["FILTER_WORKER_TIMINGS"] == "1" {
             var meta: [String: Any] = ["stages": trace.values]
             if let failure { meta["failure"] = failure }
+            if let recognition = trace.recognition { meta["recognition"] = recognition }
             let data = (try? JSONSerialization.data(withJSONObject: meta)) ?? Data("{}".utf8)
             var length = UInt32(data.count).bigEndian
             withUnsafeBytes(of: &length) { output.write(Data($0)) }

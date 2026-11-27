@@ -119,6 +119,7 @@ struct Interface: View {
                                 Text("Origin HTTP \(origin.status) · \(origin.encoding) · declared bytes " + (origin.declaredLength.isEmpty ? "unknown" : origin.declaredLength))
                             }
                             if let failure = event.failure { Text(failure).foregroundStyle(.red) }
+                            if let message = event.recognition { Text(message) }
                             if let hit = event.cacheHit { Text(hit ? "Cached decision" : "Fresh scan") }
                             ForEach(event.processing.keys.sorted(),id:\.self) { stage in
                                 Text(stage.replacingOccurrences(of:"MS",with:"") + " · " + String(event.processing[stage] ?? 0) + " ms")

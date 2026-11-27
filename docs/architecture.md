@@ -8,7 +8,7 @@ Audit a release by recording its Git tag and downloading the matching source. Th
 | Sources/NetworkSetup.swift | HTTPS probe, local certificate trust, system proxy setup and restoration |
 | proxy/policy.py and admission.py | Destination selection for PAC, TLS and HTTP, plus reservations for concurrent image bodies |
 | proxy/filter.py | Image eligibility, HTTP content decoding, result cache, request-scoped settings, worker IPC and response selection |
-| Sources/Mask.swift | ImageIO decode, Vision or Core ML segmentation, localized fallback, Core Image composition and PNG output |
+| Sources/Mask.swift and PersonMask.swift | ImageIO decode, local face and body detection, spatial confirmation of person mattes, crop retries, Core Image composition and PNG output |
 | proxy/journal.py | Bounded in-memory event retention and filtered JSON or ZIP responses through the authenticated loopback endpoint |
 | Sources/Updates.swift and install-update.sh | Check GitHub, verify asset, stage the replacement and relaunch |
 | build.sh, tests/ and .github/workflows/verify.yml | Package the runtime and model, test HTTPS and Chrome rendering on macOS, and publish the winning runner’s ZIP |
@@ -26,7 +26,7 @@ Stages are elapsed wall time rounded to milliseconds. Absent fields mean the sta
 | connectMS, upstreamTLSMS | Upstream socket setup and TLS when newly established within this request. These intervals can overlap the intervals above. |
 | prepareMS, hashMS, queueMS | Decode HTTP content encoding, validate and snapshot settings, then hash input and wait for the serialized worker |
 | workerMS | Worker startup if needed, IPC, native processing and result transfer combined |
-| decodeMS, segmentationMS, maskBoundsMS, fallbackMS | Within worker time, prepare the oriented thumbnail, run the primary detector, inspect the mask, and optionally run rescue detectors |
+| decodeMS, localizationMS, segmentationMS, confirmationMS, fallbackMS | Within worker time, prepare the oriented thumbnail, locate people, propose and confirm person pixels, and retry unresolved locations |
 | composeGraphMS, renderEncodeMS | Within worker time, construct the Core Image graph, then execute it and encode the output |
 
 Worker stages are nested within workerMS. Adding every number double-counts that interval. For a transport error before an HTTP response, status 0 means no downstream HTTP status was available. Origin metadata is recorded only if response headers reached image classification. Error text can contain host or system details. Review exported metadata before sharing.
@@ -34,3 +34,11 @@ Worker stages are nested within workerMS. Adding every number double-counts that
 The ZIP contains manifest.json with one entry per matching event and mask-settings.json with settings keyed by event ID when available. Metadata-only capture does not retain image payloads in the journal. Processing and the in-memory result cache still require image bytes. Exporting metadata alone also omits image files from sessions that retained them.
 
 The pinned mitmproxy 12.3.1 buffered-body hook in proxy/body_limit.py enforces each reservation as data arrives. Revalidate that internal API on engine upgrades. The Chrome fixture covers a locally scanned inline icon; the HTTPS suite checks unknown-length and oversized bodies. proxy/icons.py separates ICO representations, and proxy/inline_icons.py stores at most 512 origin-bound icon inputs accessible for five minutes.
+
+## Recognition regressions
+
+The product test fetches content-address-checked public photos listed in `tests/person-fixtures.json` on the build Mac. The user-reported Doona zoom response is tested at its original encoding. The test also covers the ten gallery assets, two independent pram photos, JPEG thumbnails, occupied strollers and a synthetic scene with two people separated by merchandise. Clear network responses must match the original bytes. A regional patch on each labeled positive checks that the actual person was covered.
+
+The COCO128-seg sample comes from the [Ultralytics dataset release](https://github.com/ultralytics/assets/releases/download/v0.0.0/coco128-seg.zip). Class 0 polygons provide a person reference on 128 images. Pixel precision is the fraction of masked pixels inside a labeled person. Pixel recall is the fraction of annotated person pixels covered. These are regression measurements on a fixed sample, with incomplete labels possible. The sample includes COCO training images and cannot establish performance on unseen photos. Test photos and labels are never included in the app or requested during filtering.
+
+Build-time model sources are Apple’s Core ML versions of YOLOv3 (8-bit LUT) and DeepLabV3 (FP16), verified by SHA-256 before compilation. The YOLO detector accepts the top label only when it is `person`. A detection rectangle alone cannot paint the image. The app requires spatial overlap with actual person-class pixels. The Activity detail and single-request export include the recognition summary for fresh and cached decisions.

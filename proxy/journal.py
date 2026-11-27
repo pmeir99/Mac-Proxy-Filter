@@ -54,6 +54,8 @@ class Journal:
                 processing["connectMS"] = round(1000 * (tcp - server.timestamp_start))
             if tcp is not None and tls is not None and begin <= tcp <= tls <= end:
                 processing["upstreamTLSMS"] = round(1000 * (tls - tcp))
+        if "recognition" in processing:
+            row["recognition"] = processing.pop("recognition")
         if "cacheHit" in processing: row["cacheHit"] = processing.pop("cacheHit")
         processing.pop("activeStage", None)
         row["processing"] = processing

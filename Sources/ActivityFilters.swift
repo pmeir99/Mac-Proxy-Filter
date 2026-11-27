@@ -8,6 +8,7 @@ struct Event: Codable, Identifiable {
     let outcome, method: String
     let failure: String?
     let processing: [String:Int]
+    var recognition: String? = nil
     let cacheHit: Bool?
     let time: Double
     let elapsedMS, beforeBytes, afterBytes, status: Int

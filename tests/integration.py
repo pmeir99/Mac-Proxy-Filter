@@ -272,6 +272,8 @@ with tempfile.TemporaryDirectory() as temp:
             assert any("segmentationMS" in r["processing"] for r in rows)
         events=json.loads(subprocess.check_output(diagnostic+["http://127.0.0.1:17861/events"]))
         selected=[e["id"] for e in events if "portrait" in e["searchText"]][:2]
+        assert any(e["verdict"] == "Masked" and e.get("recognition") for e in events)
+        assert any(e.get("cacheHit") and e.get("recognition") for e in events if e["verdict"] == "Masked")
         assert selected
         one = [selected[0]]
         with ZipFile(BytesIO(subprocess.check_output(diagnostic+["--data-binary",json.dumps(one),export_url]))) as report:

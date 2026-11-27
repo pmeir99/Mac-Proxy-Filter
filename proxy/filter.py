@@ -260,6 +260,18 @@ class Filter:
             raise ValueError("Oversized mask settings")
         return settings, payload
 
+    def cached_result(self, keys, timing):
+        for key in keys:
+            entry = self.cache.get(key)
+            if entry is not None:
+                self.cache.move_to_end(key)
+                result, recognition = entry
+                timing["cacheHit"] = True
+                if recognition:
+                    timing["recognition"] = recognition
+                return result
+        return None
+
     async def analyze(self, body, payload, timing):
         start = time.monotonic()
         digest = hashlib.sha256(body).digest()
@@ -267,21 +279,17 @@ class Filter:
         start = time.monotonic()
         clear_key = (digest, None)
         key = (digest, payload)
-        for cached in (clear_key, key):
-            if cached in self.cache:
-                self.cache.move_to_end(cached)
-                timing["cacheHit"] = True
-                return self.cache[cached]
+        previous = self.cached_result((clear_key, key), timing)
+        if previous is not None:
+            return previous
         timing["activeStage"] = "queue"
         async with self.lock:
             timing["activeStage"] = "worker"
             timing["queueMS"] = round(1000 * (time.monotonic() - start))
-            for cached in (clear_key, key):
-                if cached in self.cache:
-                    self.cache.move_to_end(cached)
-                    timing.pop("activeStage", None)
-                    timing["cacheHit"] = True
-                    return self.cache[cached]
+            previous = self.cached_result((clear_key, key), timing)
+            if previous is not None:
+                timing.pop("activeStage", None)
+                return previous
             timing["cacheHit"] = False
             started_worker = time.monotonic()
             if self.worker is None or self.worker.returncode is not None:
@@ -298,6 +306,8 @@ class Filter:
                         raise OSError("Invalid worker timing frame")
                     meta = json.loads(await self.worker.stdout.readexactly(meta_size))
                     timing.update(meta.get("stages", {}))
+                    if "recognition" in meta:
+                        timing["recognition"] = meta["recognition"]
                     size, = struct.unpack(">I", await self.worker.stdout.readexactly(4))
                     if size == 0xffffffff:
                         raise ValueError(meta.get("failure", "Image could not be scanned"))
@@ -312,10 +322,11 @@ class Filter:
                 raise
             timing.pop("activeStage", None)
             timing["workerMS"] = round(1000 * (time.monotonic() - started_worker))
-            self.cache[key if result else clear_key] = result
+            self.cache[key if result else clear_key] = (result, meta.get("recognition"))
             self.cost += len(result)
             while self.cost > 32*1024*1024 or len(self.cache) > 256:
-                self.cost -= len(self.cache.popitem(last=False)[1])
+                _, (evicted, _) = self.cache.popitem(last=False)
+                self.cost -= len(evicted)
             return result
 
     async def response(self, flow):
