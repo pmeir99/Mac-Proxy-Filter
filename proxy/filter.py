@@ -154,19 +154,25 @@ class Filter:
             raise ValueError("Oversized mask settings")
         return settings, payload
 
-    async def analyze(self, body, payload):
+    async def analyze(self, body, payload, timing):
+        start = time.monotonic()
         digest = hashlib.sha256(body).digest()
         clear_key = (digest, None)
         key = (digest, payload)
         for cached in (clear_key, key):
             if cached in self.cache:
                 self.cache.move_to_end(cached)
+                timing["cacheHit"] = True
                 return self.cache[cached]
         async with self.lock:
+            timing["queueMS"] = round(1000 * (time.monotonic() - start))
             for cached in (clear_key, key):
                 if cached in self.cache:
                     self.cache.move_to_end(cached)
+                    timing["cacheHit"] = True
                     return self.cache[cached]
+            timing["cacheHit"] = False
+            started_worker = time.monotonic()
             if self.worker is None or self.worker.returncode is not None:
                 self.worker = await asyncio.create_subprocess_exec(os.environ["FILTER_WORKER"],
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,env=dict(os.environ, FILTER_FRAMED_SETTINGS="1"))
@@ -188,6 +194,7 @@ class Filter:
                 await self.worker.wait()
                 self.worker = None
                 raise
+            timing["workerMS"] = round(1000 * (time.monotonic() - started_worker))
             self.cache[key if result else clear_key] = result
             self.cost += len(result)
             while self.cost > 32*1024*1024 or len(self.cache) > 256:
@@ -230,8 +237,10 @@ class Filter:
                 return
             settings, payload = self.settings()
             flow.metadata["mask_settings"] = settings
+            timing = {"queueMS": 0, "workerMS": 0}
+            flow.metadata["timing"] = timing
             async with asyncio.timeout(20):
-                masked = await self.analyze(raw, payload)
+                masked = await self.analyze(raw, payload, timing)
         except (zlib.error, OSError, ValueError, asyncio.IncompleteReadError, asyncio.TimeoutError):
             if self.capture: self.journal.add(flow,"Blocked: scan error",raw)
             self.counts["errors"] += 1

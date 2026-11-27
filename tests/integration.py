@@ -139,7 +139,7 @@ with tempfile.TemporaryDirectory() as temp:
         veto=subprocess.run(curl+["--fail","https://elsewhere.test/"],capture_output=True)
         assert veto.returncode and b"403" in veto.stderr,veto.stderr
         failures=[]
-        for edge in (64,128,256):
+        for edge in (64,128,255,256,257):
             for name in ("portrait","coffee"):
                 thumb=Image.open(work/(name+".png")).convert("RGB")
                 thumb.thumbnail((edge,edge))

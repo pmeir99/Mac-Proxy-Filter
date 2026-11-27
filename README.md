@@ -17,7 +17,7 @@ Mac Proxy Filter is a local macOS proxy that masks people in website images. Use
 | --- | --- |
 | Route | A proxy auto-configuration (PAC) file sends selected destinations to the local proxy in browsers that honor macOS proxy settings. In all-sites mode, local names and literal IP addresses go direct. |
 | Inspect | The proxy verifies the upstream HTTPS certificate and holds eligible still-image responses for scanning. The current limits are 8 MiB for the image body and 12 megapixels for decoding. |
-| Detect | A resident Swift worker uses Apple Vision person segmentation for larger images. At 256 pixels or less on the longest side it uses the bundled DeepLabV3 FP16 Core ML model, with localized person or face detection as a fallback when the mask is empty. Repeated image content can reuse a cached result. |
+| Detect | A resident Swift worker uses Apple Vision person segmentation for larger images. At 256 pixels or less on the longest side it uses the bundled DeepLabV3 FP16 Core ML model, and runs localized person or face detection when either model returns an empty mask. Repeated image content can reuse a cached result. |
 | Render | A clear result preserves the image bytes. A positive result normally returns a full-size PNG with a Core Image blur or solid cover. Chrome still owns the element, crop, border radius and overlays. For an image marked `no-transform`, a clear result passes through and an image requiring a mask is withheld. |
 | Handle failures | Recognized image requests with an unreadable or unsupported body, missing length, partial content, or a scan failure can be withheld. A missing thumbnail can therefore be a filtering decision even when the page loads. |
 

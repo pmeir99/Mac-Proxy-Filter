@@ -114,10 +114,10 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
         let row = base.advanced(by: y * CVPixelBufferGetBytesPerRow(buffer)).assumingMemoryBound(to: UInt8.self)
         for x in 0..<width where row[x] >= 128 { if !rectangle { x1 = x; break rows }; x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y) }
     }
-    var fallback: CGRect?
-    if x1 < 0 && max(w,h) <= 256 {
+    var fallback = [CGRect]()
+    if x1 < 0 {
         // Rectangle detectors can still localize a face or person when the pixel classifier is empty.
-        let factor = 512.0 / CGFloat(max(thumb.width,thumb.height))
+        let factor = max(1, 512.0 / CGFloat(max(thumb.width,thumb.height)))
         let pw = max(1,Int(CGFloat(thumb.width)*factor)), ph = max(1,Int(CGFloat(thumb.height)*factor))
         guard let canvas = CGContext(data:nil,width:pw,height:ph,bitsPerComponent:8,bytesPerRow:0,
                                      space:rgb,bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else { throw ScanFailure.unsupported }
@@ -130,8 +130,8 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
         try handler.perform([people,faces])
         let boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
                     + (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
-        var union = boxes.reduce(CGRect.null) { $0.union($1) }
-        if union.isNull && max(w,h) <= 96 {
+        fallback = boxes
+        if fallback.isEmpty && max(w,h) <= 96 {
             // A tightly cropped head may meet the input edge. Give the face
             // detector neutral context, then map its box back into source space.
             let border = CGFloat(max(pw,ph))/4
@@ -145,22 +145,26 @@ func scan(_ bytes: Data, settings env: [String: String]) throws -> Data {
                     let source = CGRect(x:(b.minX*extent.width-border)/CGFloat(pw),
                         y:(b.minY*extent.height-border)/CGFloat(ph),
                         width:b.width*extent.width/CGFloat(pw),height:b.height*extent.height/CGFloat(ph))
-                    union = union.union(source.intersection(CGRect(x:0,y:0,width:1,height:1)))
+                    let clipped = source.intersection(CGRect(x:0,y:0,width:1,height:1))
+                    if !clipped.isEmpty { fallback.append(clipped) }
                 }
             }
         }
-        if !union.isNull { fallback = union }
     }
-    guard x1 >= 0 || fallback != nil else { return Data() }
+    guard x1 >= 0 || !fallback.isEmpty else { return Data() }
     let rect = photo.extent
     var mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace:NSNull()])
         .transformed(by: CGAffineTransform(scaleX: rect.width/CGFloat(width), y: rect.height/CGFloat(height)))
         .transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
     let margin = min(0.2,max(0,Double(env["FILTER_MARGIN"] ?? "") ?? 0)) * min(rect.width,rect.height)
-    if let f = fallback {
-        let box = CGRect(x:rect.minX+f.minX*rect.width,y:rect.minY+f.minY*rect.height,
+    if !fallback.isEmpty {
+        if rectangle { fallback = [fallback.reduce(CGRect.null) { $0.union($1) }] }
+        mask = CIImage(color:.black).cropped(to:rect)
+        for f in fallback {
+            let box = CGRect(x:rect.minX+f.minX*rect.width,y:rect.minY+f.minY*rect.height,
                          width:f.width*rect.width,height:f.height*rect.height).insetBy(dx:-margin,dy:-margin)
-        mask = CIImage(color:.white).cropped(to:box).composited(over:CIImage(color:.black)).cropped(to:rect)
+            mask = CIImage(color:.white).cropped(to:box).composited(over:mask).cropped(to:rect)
+        }
     } else if env["FILTER_SHAPE"] == "Rectangle" {
         let sx = rect.width/CGFloat(width), sy = rect.height/CGFloat(height)
         let box = CGRect(x: rect.minX+CGFloat(x0)*sx,y: rect.minY+CGFloat(height-1-y1)*sy,

@@ -2,7 +2,6 @@
 from collections import deque
 from io import BytesIO
 import json
-import os
 import time
 from urllib.parse import urlsplit
 from uuid import uuid4
@@ -28,6 +27,7 @@ class Journal:
                    verdict=verdict, mime=flow.response.headers.get("content-type","").split(";")[0],
                    status=flow.response.status_code, elapsedMS=round((time.monotonic()-flow.metadata.get("started",time.monotonic()))*1000),
                    beforeBytes=len(before), afterBytes=len(after or before))
+        if "timing" in flow.metadata: row["processing"] = flow.metadata["timing"]
         if "origin" in flow.metadata:
             row["origin"] = flow.metadata["origin"]
             row["mime"] = row["origin"]["mime"]
@@ -56,7 +56,7 @@ class Journal:
                         record["after"]=f'images/{row["id"]}-after.png'
                         zip.writestr(record["after"],after)
                 rows.append(record)
-            zip.writestr("mask-settings.json",json.dumps({key:os.environ.get("FILTER_"+key,default)
-                for key,default in {"STYLE":"Blur","SHAPE":"Silhouette","STRENGTH":"0.35","MARGIN":"0","COLOR":"222222"}.items()},indent=2))
+            zip.writestr("mask-settings.json", json.dumps(
+                {row["id"]: row["maskSettings"] for row in rows if "maskSettings" in row}, indent=2))
             zip.writestr("manifest.json",json.dumps(rows,indent=2))
         return data.getvalue()
