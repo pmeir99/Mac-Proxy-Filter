@@ -144,7 +144,7 @@ def product_suite(directory, fixtures, portrait, scan):
     return errors
 
 
-def coco_suite(path, scan, label):
+def coco_suite(path, scan, build_label):
     counts = Counter()
     latency = []
     detail = []
@@ -185,9 +185,9 @@ def coco_suite(path, scan, label):
     if output := os.getenv("FILTER_TEST_EVIDENCE"):
         folder = Path(output)
         folder.mkdir(parents=True,exist_ok=True)
-        (folder/f"person-accuracy{'-reference' if label == 'preview145' else ''}.json").write_text(json.dumps({"counts":dict(counts),"images":detail},indent=2))
+        (folder/f"person-accuracy{'-reference' if build_label == 'preview145' else ''}.json").write_text(json.dumps({"counts":dict(counts),"images":detail},indent=2))
     assert len(latency) == 128
-    print("COCO128-seg",label,dict(counts),"pixel precision",round(counts["correctPixels"]/max(1,counts["maskedPixels"]),3),
+    print("COCO128-seg",build_label,dict(counts),"pixel precision",round(counts["correctPixels"]/max(1,counts["maskedPixels"]),3),
           "pixel recall",round(counts["correctPixels"]/counts["personPixels"],3),
           "median worker ms",round(statistics.median(latency),1),flush=True)
     return counts

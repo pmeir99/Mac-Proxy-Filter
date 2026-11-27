@@ -25,6 +25,7 @@ struct PersonAnchor {
 struct SelectedMatte {
     var frame = CGRect(x:0,y:0,width:1,height:1)
     var image: CIImage?
+    var clipped: CIImage?
     var unconfirmedRegions = 0
     var confirmed = Set<Int>()
     var regions = [CGRect]()  // normalized, lower-left coordinates
@@ -74,6 +75,8 @@ func selectPeople(_ buffer: CVPixelBuffer, anchors: [PersonAnchor]) throws -> Se
         }
     }
     var output = Data(count: w*h)
+    var clipped = Data()
+    var clippedCount = 0
     var selected = SelectedMatte()
     let boxes = anchors.map { $0.inPixels(w,h) }
     let minCore = max(3, w*h/65_536)
@@ -149,7 +152,12 @@ func selectPeople(_ buffer: CVPixelBuffer, anchors: [PersonAnchor]) throws -> Se
                     insideBody = true
                 }
                 if !insideBody {
-                    guard !standaloneFaces.isEmpty else { continue }
+                    guard !standaloneFaces.isEmpty else {
+                        if clipped.isEmpty { clipped = Data(count:w*h) }
+                        clipped[pixel] = 255
+                        clippedCount += 1
+                        continue
+                    }
                     var nearest = 0
                     var best = CGFloat.infinity
                     for (i,point) in standaloneFaces.enumerated() {
@@ -173,6 +181,10 @@ func selectPeople(_ buffer: CVPixelBuffer, anchors: [PersonAnchor]) throws -> Se
     if !selected.regions.isEmpty {
         selected.image = CIImage(bitmapData: output, bytesPerRow:w, size:CGSize(width:w,height:h),
                                  format:.L8,colorSpace:nil)
+    }
+    if clippedCount >= max(16,w*h/160) {
+        selected.clipped = CIImage(bitmapData:clipped,bytesPerRow:w,size:CGSize(width:w,height:h),
+                                   format:.L8,colorSpace:nil)
     }
     return selected
 }

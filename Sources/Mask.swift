@@ -169,6 +169,35 @@ func sameLocation(_ a: PersonAnchor, _ b: PersonAnchor) -> Bool {
     return intersection > 0.6 * min(a.box.width*a.box.height,b.box.width*b.box.height)
 }
 
+// Confirm small landmark faces that were missed by the full-frame body
+// detector. Only examine overlapping crops containing an unresolved face.
+// At most four small model runs are shared by all the faces in one image.
+func confirmFaces(_ candidates: [Int], anchors: [PersonAnchor], image: CGImage) throws -> Set<Int> {
+    var resolved = Set<Int>()
+    for y in [0.0,0.36] {
+        for x in [0.0,0.36] {
+            let frame = CGRect(x:x,y:y,width:0.64,height:0.64)
+            let nearby = candidates.filter { !resolved.contains($0) && frame.contains(anchors[$0].box) }
+            guard !nearby.isEmpty else { continue }
+            let pixels = PersonAnchor(box:frame,isFace:false).inPixels(image.width,image.height)
+            guard let crop = image.cropping(to:pixels) else { continue }
+            let boxes = try objectPeople(recognitionRaster(crop)).filter { ($0.objectScore ?? 0) >= 0.65 }
+            let actual = CGRect(x:pixels.minX/CGFloat(image.width),y:1-pixels.maxY/CGFloat(image.height),
+                                width:pixels.width/CGFloat(image.width),height:pixels.height/CGFloat(image.height))
+            for index in nearby {
+                let face = anchors[index].box
+                let local = CGRect(x:(face.minX-actual.minX)/actual.width,y:(face.minY-actual.minY)/actual.height,
+                                   width:face.width/actual.width,height:face.height/actual.height)
+                if boxes.contains(where:{ candidate in
+                    let overlap = candidate.box.intersection(local)
+                    return !overlap.isEmpty && overlap.width*overlap.height >= 0.60*local.width*local.height
+                }) { resolved.insert(index) }
+            }
+        }
+    }
+    return resolved
+}
+
 func hands(_ image: CGImage) throws -> [PersonAnchor] {
     let request = VNDetectHumanHandPoseRequest()
     request.maximumHandCount = 4
@@ -254,11 +283,22 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
     var mattes = [first]
     let missing = anchors.indices.filter { !confirmed.contains($0) }
     let outstanding = missing.map { anchors[$0] }
-    if !outstanding.isEmpty {
+    let extend = env["FILTER_SHAPE"] != "Rectangle" && first.clipped != nil
+    if !outstanding.isEmpty || extend {
         // Rescue a missing person using a different segmenter. A detector box
         // alone never authorizes painting unclassified pixels inside that box.
         trace.next("fallback")
         let alternate = small ? try visionMatte(raster,quality:.accurate) : try SemanticPeople.mask(thumb)
+        // A person's arm, lower body or clothing may extend beyond a detector
+        // box. Restore those attached pixels only where both segmenters agree.
+        if extend, let clipped = first.clipped {
+            let support = CIImage(cvPixelBuffer:alternate,options:[.colorSpace:NSNull()])
+            let aligned = support.transformed(by:CGAffineTransform(scaleX:clipped.extent.width/support.extent.width,
+                                                                     y:clipped.extent.height/support.extent.height))
+                .applyingFilter("CIColorThreshold",parameters:["inputThreshold":0.5])
+            let overlap = clipped.applyingFilter("CIMinimumCompositing",parameters:[kCIInputBackgroundImageKey:aligned])
+            mattes.append(SelectedMatte(image:overlap))
+        }
         let second = try selectPeople(alternate,anchors:outstanding)
         mattes.append(second)
         confirmed.formUnion(second.confirmed.map { missing[$0] })
@@ -274,15 +314,20 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
     // A verified face can contain a hole in either segmenter (babies, shadows
     // and tightly cropped heads). Fill only its local oval, and only with a
     // second source of evidence in the same location.
-    let faceOvals = anchors.indices.compactMap { index -> CGRect? in
-        let a = anchors[index]
-        guard a.landmarks else { return nil }
-        let center = CGPoint(x:a.box.midX,y:a.box.midY)
-        let corroborated = confirmed.contains(index) || anchors.contains { other in
-            !other.landmarks && !other.hand && other.box.contains(center)
-        }
-        return corroborated ? a.box : nil
+    var supportingFaces = Set<Int>()
+    var unresolvedFaces = [Int]()
+    for index in anchors.indices where anchors[index].landmarks {
+        let face = anchors[index].box
+        let center = CGPoint(x:face.midX,y:face.midY)
+        if confirmed.contains(index) || anchors.contains(where:{ !$0.landmarks && !$0.hand && $0.box.contains(center) }) {
+            supportingFaces.insert(index)
+        } else { unresolvedFaces.append(index) }
     }
+    if !unresolvedFaces.isEmpty {
+        trace.next("faceConfirmation")
+        supportingFaces.formUnion(try confirmFaces(unresolvedFaces,anchors:anchors,image:thumb))
+    }
+    let faceOvals = supportingFaces.map { anchors[$0].box }
     let regions = mattes.reduce(0) { $0 + $1.regions.count } + faceOvals.count
     let faces = anchors.filter(\.isFace).count
     let objects = anchors.filter { $0.objectScore != nil }.count
