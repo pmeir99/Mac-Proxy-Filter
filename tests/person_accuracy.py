@@ -186,9 +186,14 @@ def main():
     with worker_session(args.worker) as scan:
         errors = product_suite(args.fixture_directory,fixtures,args.portrait,scan)
         for error in errors: print("REGRESSION",error,flush=True)
-        coco_suite(args.fixture_directory/COCO["name"],scan)
+        counts = coco_suite(args.fixture_directory/COCO["name"],scan)
+        if counts["TP"] < 52 or counts["FP"] > 6:
+            errors.append("COCO image-level recall or false-positive budget failed")
+        if (counts["correctPixels"] / max(1,counts["maskedPixels"]) < 0.72 or
+            counts["correctPixels"] / counts["personPixels"] < 0.89):
+            errors.append("COCO pixel-level precision or coverage budget failed")
     if errors:
-        raise SystemExit(f"{len(errors)} accuracy regressions")
+        raise SystemExit(f"{len(errors)} accuracy regressions: " + " | ".join(errors))
 
 
 if __name__ == "__main__": main()

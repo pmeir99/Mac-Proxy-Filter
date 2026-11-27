@@ -171,6 +171,12 @@ with tempfile.TemporaryDirectory() as temp:
         preflight = subprocess.check_output(curl+["-i","-X","OPTIONS","-H","Access-Control-Request-Method: PUT",
             "https://origin.test:18243/upload.jpg"])
         assert b" 200 " in preflight and b"access-control-allow-methods: put" in preflight.lower()
+        if os.getenv("GITHUB_ACTIONS") == "true":
+            source = (Path(os.environ["RUNNER_TEMP"])/"person-fixtures"/"gallery-3840").read_bytes()
+            (work/"gallery.webp").write_bytes(source)
+            result = subprocess.check_output(curl+["--fail","-H","Sec-Fetch-Dest: image",
+                                                  "https://origin.test:18243/gallery.webp"])
+            assert result == source, "Zoomed empty stroller was modified in transit"
         for name in ["coffee.png","portrait.png","cutout.png"]:
             out=work/("out-"+name)
             started=time.perf_counter()

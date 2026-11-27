@@ -91,6 +91,54 @@ final class ScanTimings {
     }
 }
 
+func visionMatte(_ image: CGImage, quality: VNGeneratePersonSegmentationRequest.QualityLevel = .balanced) throws -> CVPixelBuffer {
+    let request = VNGeneratePersonSegmentationRequest()
+    request.qualityLevel = quality
+    request.outputPixelFormat = kCVPixelFormatType_OneComponent8
+    try VNImageRequestHandler(cgImage:image, options:[:]).perform([request])
+    guard let buffer = request.results?.first?.pixelBuffer else { throw ScanFailure.unsupported }
+    return buffer
+}
+
+func locatePeople(_ image: CGImage) throws -> [PersonAnchor] {
+    let factor = max(1, 512 / CGFloat(max(image.width,image.height)))
+    let width = max(1, Int(CGFloat(image.width)*factor)), height = max(1, Int(CGFloat(image.height)*factor))
+    guard let canvas = CGContext(data:nil,width:width,height:height,bitsPerComponent:8,bytesPerRow:0,
+                                 space:rgb,bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else { throw ScanFailure.unsupported }
+    let extent = CGRect(x:0,y:0,width:width,height:height)
+    canvas.setFillColor(gray:0.5,alpha:1)
+    canvas.fill(extent)
+    canvas.interpolationQuality = .high
+    canvas.draw(image,in:extent)
+    guard let opaque = canvas.makeImage() else { throw ScanFailure.unsupported }
+    let bodies = VNDetectHumanRectanglesRequest()
+    bodies.upperBodyOnly = false
+    let faces = VNDetectFaceRectanglesRequest()
+    try VNImageRequestHandler(cgImage:opaque,options:[:]).perform([bodies,faces])
+    var anchors = (bodies.results ?? []).filter { $0.confidence >= 0.60 }
+        .map { PersonAnchor(box:$0.boundingBox,isFace:false) }
+    anchors += (faces.results ?? []).filter { $0.confidence >= 0.72 }
+        .map { PersonAnchor(box:$0.boundingBox,isFace:true) }
+    if anchors.isEmpty && max(image.width,image.height) <= 96 {
+        let border = CGFloat(max(width,height))/4
+        let frame = extent.insetBy(dx:-border,dy:-border)
+        let framed = CIImage(cgImage:opaque).composited(over:CIImage(color:CIColor(red:0.5,green:0.5,blue:0.5))).cropped(to:frame)
+        if let padded = context.createCGImage(framed,from:frame) {
+            let retry = VNDetectFaceRectanglesRequest()
+            try VNImageRequestHandler(cgImage:padded,options:[:]).perform([retry])
+            for face in retry.results ?? [] where face.confidence >= 0.72 {
+                let box = face.boundingBox
+                let mapped = CGRect(x:(box.minX*frame.width-border)/extent.width,
+                    y:(box.minY*frame.height-border)/extent.height,
+                    width:box.width*frame.width/extent.width,height:box.height*frame.height/extent.height)
+                    .intersection(CGRect(x:0,y:0,width:1,height:1))
+                if !mapped.isEmpty { anchors.append(PersonAnchor(box:mapped,isFace:true)) }
+            }
+        }
+    }
+    return anchors
+}
+
 func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) throws -> Data {
     guard let src = CGImageSourceCreateWithData(bytes as CFData, nil),
           CGImageSourceGetCount(src) == 1,
@@ -105,95 +153,46 @@ func scan(_ bytes: Data, settings env: [String: String], trace: ScanTimings) thr
             kCGImageSourceCreateThumbnailWithTransform:true,
             kCGImageSourceThumbnailMaxPixelSize:min(1024,max(w,h))
           ] as CFDictionary) else { throw ScanFailure.unsupported }
+    trace.next("localization")
+    let anchors = try locatePeople(thumb)
+    guard !anchors.isEmpty else { return Data() }
     trace.next("segmentation")
-    let buffer: CVPixelBuffer
-    if max(w,h) <= 256 {
-        buffer = try SemanticPeople.mask(thumb)
-    } else {
-        let request = VNGeneratePersonSegmentationRequest()
-        request.qualityLevel = .balanced
-        request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        try VNImageRequestHandler(cgImage: thumb, options: [:]).perform([request])
-        guard let result = request.results?.first?.pixelBuffer else { throw ScanFailure.unsupported }
-        buffer = result
-    }
-    trace.next("maskBounds")
-    guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { throw ScanFailure.unsupported }
-    defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-    guard let base = CVPixelBufferGetBaseAddress(buffer) else { throw ScanFailure.unsupported }
-    let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
-    var x0 = width, x1 = -1, y0 = height, y1 = -1
-    let rectangle = env["FILTER_SHAPE"] == "Rectangle"
-    rows: for y in 0..<height {
-        let row = base.advanced(by: y * CVPixelBufferGetBytesPerRow(buffer)).assumingMemoryBound(to: UInt8.self)
-        for x in 0..<width where row[x] >= 128 { if !rectangle { x1 = x; break rows }; x0 = min(x0,x); x1 = max(x1,x); y0 = min(y0,y); y1 = max(y1,y) }
-    }
-    var fallback = [CGRect]()
-    if x1 < 0 {
+    let small = max(w,h) <= 256
+    let primary = small ? try SemanticPeople.mask(thumb) : try visionMatte(thumb)
+    trace.next("confirmation")
+    let first = try selectPeople(primary, anchors:anchors)
+    var mattes = [first]
+    let outstanding = anchors.indices.filter { !first.confirmed.contains($0) }.map { anchors[$0] }
+    if !outstanding.isEmpty {
+        // Rescue a missing person using a different segmenter. A detector box
+        // alone never authorizes painting unclassified pixels inside that box.
         trace.next("fallback")
-        // Rectangle detectors can still localize a face or person when the pixel classifier is empty.
-        let factor = max(1, 512.0 / CGFloat(max(thumb.width,thumb.height)))
-        let pw = max(1,Int(CGFloat(thumb.width)*factor)), ph = max(1,Int(CGFloat(thumb.height)*factor))
-        guard let canvas = CGContext(data:nil,width:pw,height:ph,bitsPerComponent:8,bytesPerRow:0,
-                                     space:rgb,bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue) else { throw ScanFailure.unsupported }
-        canvas.interpolationQuality = .high
-        canvas.draw(thumb,in:CGRect(x:0,y:0,width:pw,height:ph))
-        guard let enlarged = canvas.makeImage() else { throw ScanFailure.unsupported }
-        let people = VNDetectHumanRectanglesRequest()
-        let faces = VNDetectFaceRectanglesRequest()
-        let handler = VNImageRequestHandler(cgImage:enlarged,options:[:])
-        try handler.perform([people,faces])
-        let boxes = (people.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
-                    + (faces.results ?? []).filter { $0.confidence >= 0.6 }.map(\.boundingBox)
-        fallback = boxes
-        if fallback.isEmpty && max(w,h) <= 96 {
-            // A tightly cropped head may meet the input edge. Give the face
-            // detector neutral context, then map its box back into source space.
-            let border = CGFloat(max(pw,ph))/4
-            let extent = CGRect(x:-border,y:-border,width:CGFloat(pw)+2*border,height:CGFloat(ph)+2*border)
-            let framed = CIImage(cgImage:enlarged).composited(over:CIImage(color:CIColor(red:0.5,green:0.5,blue:0.5))).cropped(to:extent)
-            if let padded = context.createCGImage(framed,from:extent) {
-                let retry = VNDetectFaceRectanglesRequest()
-                try VNImageRequestHandler(cgImage:padded,options:[:]).perform([retry])
-                for face in retry.results ?? [] where face.confidence >= 0.6 {
-                    let b = face.boundingBox
-                    let source = CGRect(x:(b.minX*extent.width-border)/CGFloat(pw),
-                        y:(b.minY*extent.height-border)/CGFloat(ph),
-                        width:b.width*extent.width/CGFloat(pw),height:b.height*extent.height/CGFloat(ph))
-                    let clipped = source.intersection(CGRect(x:0,y:0,width:1,height:1))
-                    if !clipped.isEmpty { fallback.append(clipped) }
-                }
-            }
-        }
+        let alternate = small ? try visionMatte(thumb,quality:.accurate) : try SemanticPeople.mask(thumb)
+        mattes.append(try selectPeople(alternate,anchors:outstanding))
     }
-    guard x1 >= 0 || !fallback.isEmpty else { return Data() }
+    guard mattes.contains(where:{ $0.image != nil }) else { return Data() }
     trace.next("composeGraph")
     let rect = photo.extent
-    var mask = CIImage(cvPixelBuffer: buffer, options: [.colorSpace:NSNull()])
-        .transformed(by: CGAffineTransform(scaleX: rect.width/CGFloat(width), y: rect.height/CGFloat(height)))
-        .transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
     let margin = min(0.2,max(0,Double(env["FILTER_MARGIN"] ?? "") ?? 0)) * min(rect.width,rect.height)
-    if !fallback.isEmpty {
-        if rectangle { fallback = [fallback.reduce(CGRect.null) { $0.union($1) }] }
-        mask = CIImage(color:.black).cropped(to:rect)
-        for f in fallback {
-            let box = CGRect(x:rect.minX+f.minX*rect.width,y:rect.minY+f.minY*rect.height,
-                         width:f.width*rect.width,height:f.height*rect.height).insetBy(dx:-margin,dy:-margin)
+    var mask = CIImage(color:.black).cropped(to:rect)
+    if env["FILTER_SHAPE"] == "Rectangle" {
+        for region in mattes.flatMap(\.regions) {
+            let box = CGRect(x:rect.minX+region.minX*rect.width,y:rect.minY+region.minY*rect.height,
+                             width:region.width*rect.width,height:region.height*rect.height).insetBy(dx:-margin,dy:-margin)
             mask = CIImage(color:.white).cropped(to:box).composited(over:mask).cropped(to:rect)
         }
-    } else if env["FILTER_SHAPE"] == "Rectangle" {
-        let sx = rect.width/CGFloat(width), sy = rect.height/CGFloat(height)
-        let box = CGRect(x: rect.minX+CGFloat(x0)*sx,y: rect.minY+CGFloat(height-1-y1)*sy,
-                         width: CGFloat(x1-x0+1)*sx,height: CGFloat(y1-y0+1)*sy).insetBy(dx:-margin,dy:-margin)
-        mask = CIImage(color:.white).cropped(to:box).composited(over:CIImage(color:.black)).cropped(to:rect)
-    } else if margin > 0 {
-        mask = mask.applyingFilter("CIMorphologyMaximum",parameters:["inputRadius":margin]).cropped(to:rect)
+    } else {
+        for matte in mattes.compactMap(\.image) {
+            let aligned = matte.transformed(by:CGAffineTransform(scaleX:rect.width/matte.extent.width,
+                                                                    y:rect.height/matte.extent.height))
+                .transformed(by:CGAffineTransform(translationX:rect.minX,y:rect.minY))
+            mask = aligned.applyingFilter("CIMaximumCompositing",parameters:[kCIInputBackgroundImageKey:mask]).cropped(to:rect)
+        }
+        if margin > 0 { mask = mask.applyingFilter("CIMorphologyMaximum",parameters:["inputRadius":margin]).cropped(to:rect) }
     }
-    // Apply the complete treatment wherever the resampled person matte has support.
-    // Gray matte values otherwise mix sharp source detail back into the Gaussian.
-    guard let threshold = CIFilter(name: "CIColorThreshold") else { throw ScanFailure.unsupported }
-    threshold.setValue(mask, forKey: kCIInputImageKey)
-    threshold.setValue(0.05, forKey: "inputThreshold")
+    guard let threshold = CIFilter(name:"CIColorThreshold") else { throw ScanFailure.unsupported }
+    threshold.setValue(mask,forKey:kCIInputImageKey)
+    threshold.setValue(0.5,forKey:"inputThreshold")
     guard let binaryMask = threshold.outputImage else { throw ScanFailure.unsupported }
     let foreground: CIImage
     if env["FILTER_STYLE"] == "Blur" {

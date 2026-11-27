@@ -79,7 +79,7 @@ struct Interface: View {
                 Section("Coverage") {
                     Picker("Shape",selection:$shape) { Text("Follow people").tag("Silhouette"); Text("Enclosing rectangle").tag("Rectangle") }
                     Slider(value:$margin,in:0...0.2,step:0.01) { Text("Extra margin · "+String(Int((margin*100).rounded()))+"%") }
-                    Text("The rectangle covers the area containing all detected people. Margin is relative to the shorter image dimension.").foregroundStyle(.secondary)
+                    Text("Each rectangle covers a confirmed region. Margin is relative to the shorter image dimension.").foregroundStyle(.secondary)
                 }
             }.onChange(of:[style,shape,String(strength),String(margin),hex]) { _,_ in if model.active { model.saveMaskSettings() } }.tabItem { Label("Mask",systemImage:"person.crop.rectangle") }
             VStack(alignment:.leading,spacing:12) {
